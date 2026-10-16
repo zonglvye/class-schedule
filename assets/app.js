@@ -1,0 +1,1873 @@
+/* ==========================================================================
+   我的课表 · 作业待办 · 定时提醒   —— 纯前端 PWA，数据全部本地存储
+   ========================================================================== */
+(function () {
+'use strict';
+
+/* ------------------------------ 常量 ------------------------------ */
+var KEY = 'dsh.classSchedule.v1';
+var DAY = 86400000;
+var WD = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+var WD_S = ['一', '二', '三', '四', '五', '六', '日'];
+var COLORS = ['#6366f1', '#8b5cf6', '#ec4899', '#ef4444', '#f59e0b', '#10b981', '#0ea5e9', '#14b8a6', '#f97316', '#3b82f6'];
+var PRIOS = [
+  { v: 1, t: '紧急', c: '#ef4444' },
+  { v: 2, t: '重要', c: '#f59e0b' },
+  { v: 3, t: '普通', c: '#0ea5e9' }
+];
+var LEADS = [
+  { v: 0, t: '准时' }, { v: 10, t: '提前 10 分钟' }, { v: 15, t: '提前 15 分钟' },
+  { v: 20, t: '提前 20 分钟' }, { v: 30, t: '提前 30 分钟' }, { v: 60, t: '提前 1 小时' }
+];
+var TASK_LEADS = [
+  { v: 0, t: '不提醒' }, { v: 30, t: '提前 30 分钟' }, { v: 60, t: '提前 1 小时' }, { v: 180, t: '提前 3 小时' },
+  { v: 360, t: '提前 6 小时' }, { v: 720, t: '提前 12 小时' }, { v: 1440, t: '提前 1 天' },
+  { v: 2880, t: '提前 2 天' }, { v: 4320, t: '提前 3 天' }
+];
+var DEF_SLOTS = [
+  ['08:00', '08:45'], ['08:55', '09:40'], ['10:00', '10:45'], ['10:55', '11:40'],
+  ['14:00', '14:45'], ['14:55', '15:40'], ['16:00', '16:45'], ['16:55', '17:40'],
+  ['19:00', '19:45'], ['19:55', '20:40']
+];
+var DEF_SETTINGS = {
+  semesterStart: '', weeks: 20, slots: DEF_SLOTS.map(function (s) { return { s: s[0], e: s[1] } }),
+  slotsCustom: false, theme: 'auto', parityShift: 0,
+  ring: true, vibrate: true, classRemind: true, classLead: 15,
+  taskRemind: true, taskLeads: [1440, 60], overdueRemind: true, notifyOff: false
+};
+
+/* ------------------------------ 状态 ------------------------------ */
+var S = null;
+var UI = {
+  page: 'schedule', week: 1, sel: null, mode: 'all', courseFilter: '', sort: 'ddl',
+  open: false, taskFilter: 'undone', noInstall: false,
+  seeded: false, seedSkipped: '', canApplySeed: false, seedOld: null, seedUpdated: null
+};
+var tickTimer = null;
+
+/* ------------------------------ 工具 ------------------------------ */
+function $(s, r) { return (r || document).querySelector(s); }
+function $$(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
+function pad(n) { return (n < 10 ? '0' : '') + n; }
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+  });
+}
+function today0() { var d = new Date(); d.setHours(0, 0, 0, 0); return d; }
+function fromISO(iso) {
+  if (!iso) return null;
+  var p = String(iso).split('-');
+  var d = new Date(+p[0], +p[1] - 1, +p[2]);
+  if (isNaN(d.getTime())) return null;
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+function toISO(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+function addDays(d, n) { var x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; }
+function daysBetween(a, b) { return Math.round((b.getTime() - a.getTime()) / DAY); }
+function mondayOf(d) { var x = new Date(d.getTime()); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
+function parseHM(hm) { var p = String(hm || '0:0').split(':'); return (+p[0]) * 60 + (+p[1] || 0); }
+function hmToDate(base, hm) {
+  var m = parseHM(hm);
+  return new Date(base.getFullYear(), base.getMonth(), base.getDate(), Math.floor(m / 60), m % 60, 0, 0);
+}
+function nowMin() { var d = new Date(); return d.getHours() * 60 + d.getMinutes(); }
+function fmtClock(d) { return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+function fmtDate(d) { return (d.getMonth() + 1) + '月' + d.getDate() + '日'; }
+function humanGap(ms) {
+  var s = Math.floor(Math.abs(ms) / 1000);
+  if (s < 60) return s + ' 秒';
+  var m = Math.floor(s / 60);
+  if (m < 60) return m + ' 分钟';
+  var h = Math.floor(m / 60), mm = m % 60;
+  if (h < 24) return h + ' 小时' + (mm ? ' ' + mm + ' 分' : '');
+  var dd = Math.floor(h / 24), hh = h % 24;
+  return dd + ' 天' + (hh ? ' ' + hh + ' 小时' : '');
+}
+function shortGap(ms) {
+  var over = ms < 0; ms = Math.abs(ms);
+  var s = Math.floor(ms / 1000);
+  var str;
+  if (s < 60) str = s + 's';
+  else if (s < 3600) str = Math.floor(s / 60) + 'm';
+  else if (s < 86400) { var h = Math.floor(s / 3600); str = h + 'h' + (Math.floor(s % 3600 / 60) ? Math.floor(s % 3600 / 60) + 'm' : ''); }
+  else str = Math.floor(s / 86400) + 'd' + (Math.floor(s % 86400 / 3600) ? Math.floor(s % 86400 / 3600) + 'h' : '');
+  return (over ? '逾期 ' : '') + str;
+}
+function toast(msg, icon) {
+  var w = $('#toastWrap');
+  var el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = (icon ? '<span>' + icon + '</span>' : '') + '<span>' + esc(msg) + '</span>';
+  w.appendChild(el);
+  setTimeout(function () { el.classList.add('out'); setTimeout(function () { el.remove(); }, 260); }, 2100);
+}
+
+/* ------------------------------ 存储 ------------------------------ */
+/* ============ 个人专属课表种子数据 ============
+   构建时可用 _dev/personal-seed.json 注入（见 _dev/build.mjs）。
+   只在「这台设备第一次打开」时写入，之后所有改动都不会被覆盖；
+   把种子清空并重新构建，就退回通用模板。 */
+var SEED = (typeof window !== 'undefined' && window.__SEED__) || null;
+/* 种子结构与 App 的存储结构完全一致：{ courses, tasks, reminders, settings }
+   学期信息在 seed.settings.semesterStart / seed.settings.weeks
+   可选 seed._meta.seedVersion：每次更新专属课表就 +1，便于识别"云端更新了" */
+function seedVersion(seed) { return (seed && seed._meta && Number(seed._meta.seedVersion)) || 1; }
+function seedMatchesNow(seed) {
+  if (!seed) return { ok: false, why: '没有种子数据' };
+  var st = seed.settings || {};
+  var startISO = st.semesterStart || '';
+  var total = st.weeks || 20;
+  if (!startISO) return { ok: false, why: '种子数据里没有开学日期' };
+  var startMonday = mondayOf(fromISO(startISO));
+  if (!startMonday) return { ok: false, why: '种子里的开学日期无法解析：' + startISO };
+  var w = Math.round(daysBetween(startMonday, mondayOf(today0())) / 7) + 1;
+  if (w < 1) return { ok: false, why: '还没开学（种子从第 1 周 ' + startISO + ' 开始，现在是第 ' + w + ' 周）' };
+  if (w > total) return { ok: false, why: '学期已结束（种子共 ' + total + ' 周，现在是第 ' + w + ' 周）' };
+  return { ok: true, week: w };
+}
+/* 把种子写入本地，并记下版本，避免每次打开都问 */
+function applySeed(seed) {
+  var d = { courses: seed.courses || [], tasks: seed.tasks || [], reminders: {}, settings: seed.settings || {} };
+  d.settings = Object.assign({}, d.settings, { seedVersion: seedVersion(seed), wizardDone: true });
+  try { localStorage.setItem(KEY, JSON.stringify(d)); return true; } catch (e) { return false; }
+}
+function load() {
+  var raw = null;
+  try { raw = localStorage.getItem(KEY); } catch (e) { }
+  UI.canApplySeed = false;
+  if (SEED) {
+    var m = seedMatchesNow(SEED);
+    if (!raw) {
+      /* 这台设备第一次打开本站：直接带入专属课表 */
+      if (m.ok && applySeed(SEED)) {
+        try { raw = localStorage.getItem(KEY); } catch (e) { }
+        UI.seeded = true;
+      } else if (!m.ok) {
+        UI.seedSkipped = m.why;
+      }
+    } else {
+      /* 本地已有数据。判断是不是「还没用过专属课表」，或者「云端更新了专属课表」 */
+      var cur = null;
+      try { cur = JSON.parse(raw); } catch (e) { }
+      var curVer = cur && cur.settings && Number(cur.settings.seedVersion) || 0;
+      var newVer = seedVersion(SEED);
+      if (curVer === 0) {
+        /* 以前打开过旧版（那时还没有专属课表），现在是第一次带上它 */
+        UI.seedOld = { version: newVer, week: m.week, why: m.ok ? '' : m.why };
+        UI.canApplySeed = m.ok;
+      } else if (newVer > curVer && m.ok) {
+        /* 云端更新了专属课表 */
+        UI.seedUpdated = { version: newVer, week: m.week };
+        UI.canApplySeed = true;
+      }
+    }
+  }
+  var d = { courses: [], tasks: [], reminders: {}, settings: {} };
+  if (raw) { try { d = Object.assign(d, JSON.parse(raw)); } catch (e) { } }
+  d.courses = d.courses || []; d.tasks = d.tasks || []; d.reminders = d.reminders || {};
+  var st = Object.assign({}, DEF_SETTINGS, d.settings || {});
+  if (!st.semesterStart) st.semesterStart = toISO(mondayOf(today0()));
+  if (!Array.isArray(st.slots) || !st.slots.length) st.slots = DEF_SETTINGS.slots.map(function (x) { return { s: x.s, e: x.e }; });
+  if (!Array.isArray(st.taskLeads)) st.taskLeads = [1440, 60];
+  if (!st.weeks || st.weeks < 1) st.weeks = 20;
+  d.settings = st;
+  S = d;
+}
+/* 用专属课表覆盖本地数据（设置页的按钮 / 启动时的一键载入都走这里） */
+function applySeedNow(silent) {
+  if (!SEED) { if (!silent) toast('当前版本没有内置专属课表', 'ℹ️'); return false; }
+  var m = seedMatchesNow(SEED);
+  if (!m.ok) { if (!silent) toast('无法载入：' + m.why, '⚠️'); return false; }
+  if (!applySeed(SEED)) { if (!silent) toast('写入本地存储失败', '⚠️'); return false; }
+  try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { }
+  UI.week = clampWeek(currentWeek());
+  UI.seeded = true; UI.canApplySeed = false; UI.seedOld = null; UI.seedUpdated = null;
+  renderAll();
+  if (!silent) toast('已载入专属课表：' + S.courses.length + ' 门课', '🎉');
+  return true;
+}
+function save() {
+  if (S.reminders) {
+    var keys = Object.keys(S.reminders);
+    if (keys.length > 400) {
+      keys.sort(function (a, b) { return S.reminders[a] - S.reminders[b]; });
+      keys.slice(0, keys.length - 300).forEach(function (k) { delete S.reminders[k]; });
+    }
+  }
+  try { localStorage.setItem(KEY, JSON.stringify(S)); }
+  catch (e) { toast('保存失败：本地存储可能已满', '⚠️'); }
+  /* APK 版：数据一变就重排系统闹钟（内部有防抖 + 内容比对，不会反复折腾系统） */
+  if (NATIVE) scheduleNativeSync();
+}
+
+/* ------------------------------ 教学周 / 课次 ------------------------------ */
+function courseWeekOffset() { return Math.round(daysBetween(mondayOf(fromISO(S.settings.semesterStart)), mondayOf(today0())) / 7); }
+function fridayOfCurWeek() { return addDays(mondayOf(today0()), 4); }
+function currentWeek() { return courseWeekOffset() + 1; }
+function weekStartDate(w) { return addDays(mondayOf(fromISO(S.settings.semesterStart)), (w - 1) * 7); }
+function dateOfSlot(w, day) { return addDays(weekStartDate(w), day - 1); }
+function inWeeks(c, w) {
+  if (w < (c.fromWeek || 1) || w > (c.toWeek || 20)) return false;
+  /* parityShift：0 = 本学期第 1 周算单周；1 = 第 1 周算双周（很多学校这样）。
+     只翻转奇偶判断，不改动周次编号与日期对应关系。 */
+  var parity = ((w + (S.settings.parityShift || 0)) % 2 === 1) ? 'odd' : 'even';
+  if (c.weeksMode === 'odd' && parity !== 'odd') return false;
+  if (c.weeksMode === 'even' && parity !== 'even') return false;
+  if (c.weeksMode === 'custom' && Array.isArray(c.weeks) && c.weeks.length) return c.weeks.indexOf(w) >= 0;
+  return true;
+}
+/* 某一周在当前设定下算单周还是双周 */
+function weekParity(w) {
+  return ((w + (S.settings.parityShift || 0)) % 2 === 1) ? 'odd' : 'even';
+}
+function parityText(w) { return weekParity(w) === 'odd' ? '单周' : '双周'; }
+function weekModeText(c) {
+  var base = '第 ' + (c.fromWeek || 1) + '-' + (c.toWeek || 20) + ' 周';
+  if (c.weeksMode === 'odd') return base + '（单周）';
+  if (c.weeksMode === 'even') return base + '（双周）';
+  if (c.weeksMode === 'custom') return '第 ' + (c.weeks || []).join('/') + ' 周';
+  return base;
+}
+/* 某一周里实际出现的课程块（已按位置合并同一次课的连排） */
+function courseBlocks(w) {
+  var out = [];
+  S.courses.forEach(function (c) {
+    DAYS(c).forEach(function (g) {
+      if (!inWeeks(c, w)) return;
+      out.push({
+        id: c.id, day: g.day, from: g.from, to: g.to,
+        name: c.name, teacher: c.teacher, room: c.room, color: c.color,
+        start: S.settings.slots[g.from - 1] ? S.settings.slots[g.from - 1].s : '',
+        end: S.settings.slots[g.to - 1] ? S.settings.slots[g.to - 1].e : '',
+        date: dateOfSlot(w, g.day)
+      });
+    });
+  });
+  return out;
+}
+function DAYS(c) {
+  if (Array.isArray(c.days) && c.days.length) return c.days;
+  if (c.day) return [{ day: c.day, from: c.from, to: c.to }];
+  return [];
+}
+function courseById(id) {
+  for (var i = 0; i < S.courses.length; i++) if (S.courses[i].id === id) return S.courses[i];
+  return null;
+}
+function courseName(id) { var c = courseById(id); return c ? c.name : ''; }
+
+/* ------------------------------ 提醒引擎 ------------------------------ */
+function taskDT(t) {
+  var d = fromISO(t.ddlDate); if (!d) return null;
+  var m = parseHM(t.ddlTime || '23:59');
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(m / 60), m % 60, 0, 0);
+}
+function rkey(k) { return String(k); }
+function wasSent(k) { return !!S.reminders[rkey(k)]; }
+function markSent(k) { S.reminders[rkey(k)] = Date.now(); }
+
+function fireNotify(kind, title, body, tag) {
+  var st = S.settings;
+  pushBanner(title, body);
+  if (st.notifyOff) return;
+  if (typeof Notification === 'undefined') return;
+  if (Notification.permission !== 'granted') return;
+  try {
+    var n = new Notification(title, {
+      body: body, tag: tag, renotify: true, requireInteraction: false,
+      icon: 'assets/icon-192.png', badge: 'assets/icon-192.png', silent: true
+    });
+    n.onclick = function () { try { window.focus(); } catch (e) { } n.close(); };
+  } catch (e) { /* 部分环境（如 Android WebView）不支持构造式通知，横幅已兜底 */ }
+}
+function pushBanner(title, body) {
+  var b = $('#banner');
+  $('#bnTitle').textContent = title;
+  $('#bnBody').textContent = body;
+  b.hidden = false;
+  clearTimeout(pushBanner._t);
+  pushBanner._t = setTimeout(function () { b.hidden = true; }, 20000);
+}
+/* 简易提示音：两短一长，无需音频文件 */
+function beep() {
+  if (!S.settings.ring) return;
+  try {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    var ctx = new AC();
+    [0, .22, .5].forEach(function (t, i) {
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(i === 2 ? 1046 : 784, ctx.currentTime + t);
+      g.gain.setValueAtTime(0.0001, ctx.currentTime + t);
+      g.gain.exponentialRampToValueAtTime(0.28, ctx.currentTime + t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t + (i === 2 ? 0.42 : 0.18));
+      o.connect(g); g.connect(ctx.destination);
+      o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.45);
+    });
+    setTimeout(function () { try { ctx.close(); } catch (e) { } }, 1600);
+  } catch (e) { }
+}
+function buzz() {
+  if (!S.settings.vibrate) return;
+  try { if (navigator.vibrate) navigator.vibrate([220, 90, 220]); } catch (e) { }
+}
+function alertOut(title, body, tag) {
+  fireNotify(tag, title, body, tag);
+  beep(); buzz();
+}
+
+/* 上课提醒的语义：从「课前 N 分钟」这个触发点开始，一直提醒到这节课正式开始为止。
+   好处是即使手机刚解锁 / App 刚打开（已经过了触发点），也仍然会立刻提示「还有 X 分钟上课」，
+   而不是静默错过。去重靠 S.reminders 里的记录，同一节课只提醒一次。 */
+var GRACE = 2 * 60 * 1000;
+var EARLY = 60 * 1000;
+/* ============ 提醒时间表（预览 + 空转检查共用同一套计算） ============ */
+function classTemplates(maxWeek) {
+  var st = S.settings, now = Date.now(), out = [];
+  var cw = Math.max(1, currentWeek());
+  /* 不传参：页面内提醒只需覆盖最近两周多（省算力）；
+     传入 maxWeek：交给系统闹钟时必须覆盖整个学期（用户可能几周都不开 App） */
+  var limit = maxWeek ? Math.min(st.weeks, Math.max(cw, maxWeek)) : Math.min(st.weeks, cw + 2);
+  for (var w = cw; w <= limit; w++) {
+    courseBlocks(w).forEach(function (b) {
+      if (!b.start) return;
+      var start = hmToDate(b.date, b.start);
+      if (start.getTime() + 45 * 60000 < now) return;
+      out.push({
+        kind: 'cls', name: b.name, extra: [b.room, b.teacher].filter(Boolean).join(' · '),
+        timeLabel: b.start + '–' + b.end + ' 第 ' + b.from + (b.to !== b.from ? '-' + b.to : '') + ' 节',
+        start: start, end: hmToDate(b.date, b.end) || new Date(start.getTime() + 45 * 60000),
+        trig: start.getTime() - (st.classLead || 0) * 60000,
+        key: 'cls|' + b.id + '|' + b.day + '|' + b.from + '|' + BILL(b.date),
+        priority: 1
+      });
+    });
+  }
+  return out;
+}
+function upcomingTasks() {
+  var st = S.settings, out = [];
+  S.tasks.forEach(function (t) {
+    if (t.done) return;
+    var dt = taskDT(t); if (!dt) return;
+    var leads = (t.leads && t.leads.length ? t.leads : st.taskLeads).slice().sort(function (a, b) { return b - a; });
+    leads.forEach(function (L) {
+      out.push({
+        kind: 'task', name: t.title, extra: courseName(t.courseId),
+        timeLabel: '截止 ' + fmtDate(dt) + ' ' + fmtClock(dt),
+        start: dt, trig: dt.getTime() - L * 60000,
+        key: 'task|' + t.id + '|' + L,
+        priority: t.prio || 3
+      });
+    });
+  });
+  return out;
+}
+function nextReminders() {
+  var now = Date.now();
+  return classTemplates().concat(upcomingTasks())
+    .filter(function (r) { return r.trig > now - EARLY && r.trig < now + 7 * DAY && !wasSent(r.key); })
+    .sort(function (a, b) { return a.trig - b.trig; });
+}
+/* 到点即触发：同一份数据，检查与预览不会走偏 */
+function fireDueReminders() {
+  var now = Date.now();
+  var due = classTemplates().filter(function (r) {
+    return now >= r.trig - EARLY && now < r.start.getTime() && !wasSent(r.key);
+  }).concat(upcomingTasks().filter(function (r) {
+    return now >= r.trig - EARLY && now < r.start.getTime() + GRACE && !wasSent(r.key);
+  }));
+  var seen = {};
+  due.sort(function (a, b) { return a.trig - b.trig; });
+  due.forEach(function (r) {
+    if (seen[r.key]) return;
+    seen[r.key] = 1;
+    if (wasSent(r.key)) return;
+    markSent(r.key);
+    if (r.kind === 'cls') {
+      var left = Math.max(0, Math.round((r.start.getTime() - now) / 60000));
+      alertOut((left ? '还有 ' + left + ' 分钟上课 · ' : '该上课了 · ') + r.name,
+        r.timeLabel + (r.extra ? ' · ' + r.extra : ''), r.key);
+    } else {
+      alertOut('作业 ' + humanGap(r.start.getTime() - now) + '后截止 · ' + r.name,
+        [r.extra, r.timeLabel].filter(Boolean).join(' · '), r.key);
+    }
+  });
+  /* 逾期兜底：截止后第一次打开时提示一次 */
+  if (S.settings.overdueRemind) {
+    S.tasks.forEach(function (t) {
+      if (t.done) return;
+      var dt = taskDT(t); if (!dt) return;
+      if (now > dt.getTime() && now - dt.getTime() < 6 * 3600000) {
+        var k = 'over|' + t.id;
+        if (!wasSent(k)) { markSent(k); due.push({ key: k }); alertOut('作业已逾期 · ' + t.title, '截止时间 ' + fmtDate(dt) + ' ' + fmtClock(dt) + '，抓紧补交', k); }
+      }
+    });
+  }
+  return due.length > 0;
+}
+function checkReminders(manual) {
+  var fired = fireDueReminders();
+  if (fired) { save(); renderBadge(); if (UI.page === 'agenda') renderAgenda(); if (UI.page === 'tasks') renderTasks(); }
+  if (manual) toast(fired ? '已触发提醒' : '暂无到点的提醒（已扫描）', fired ? '🔔' : '🔍');
+  return fired;
+}
+function BILL(d) { return toISO(d); }
+
+/* 打开 App 时补一次「错过的提醒」汇总：App 没开着时系统通知发不出来，这里至少让用户看到 */
+function catchUp() {
+  /* APK 版不需要这套兜底：提醒由系统闹钟负责，App 没开着也照样响 */
+  if (NATIVE) return;
+  var st = S.settings, now = Date.now(), missed = [];
+  if (S.settings.classRemind) {
+    courseBlocks(currentWeek()).forEach(function (b) {
+      if (!b.start) return;
+      var start = hmToDate(b.date, b.start);
+      var trig = start.getTime() - (st.classLead || 0) * 60000;
+      var k = 'cls|' + b.id + '|' + b.day + '|' + b.from + '|' + BILL(b.date);
+      /* 刚触发过但没弹出来（当时 App 没开），且课还没开始 */
+      if (now - trig > GRACE && now < start.getTime() && !wasSent(k)) {
+        missed.push('「' + b.name + '」' + b.start + ' 开始');
+      }
+    });
+  }
+  if (S.settings.taskRemind) {
+    S.tasks.forEach(function (t) {
+      if (t.done) return;
+      var dt = taskDT(t); if (!dt) return;
+      var leads = (t.leads && t.leads.length ? t.leads : st.taskLeads).slice().sort(function (a, b) { return b - a; });
+      leads.forEach(function (L) {
+        var trig = dt.getTime() - L * 60000;
+        var k = 'task|' + t.id + '|' + L;
+        if (now - trig > GRACE && now - trig < 6 * 3600000 && !wasSent(k)) {
+          missed.push('「' + t.title + '」' + humanGap(dt.getTime() - now) + '后截止');
+        }
+      });
+    });
+  }
+  if (missed.length) {
+    pushBanner('有 ' + missed.length + ' 条提醒刚才没能弹出',
+      missed.slice(0, 2).join('；') + (missed.length > 2 ? ' 等' : '') + '。App 没打开时无法提醒，建议同时用「导出到系统日历」做兜底。');
+  }
+}
+
+/* ------------------------------ 通知权限 ------------------------------ */
+function permState() {
+  /* APK 版看的是系统「通知」权限，而不是浏览器的 Notification.permission */
+  if (NATIVE) return nativeCaps().notify ? 'granted' : 'default';
+  if (typeof Notification === 'undefined') return 'unsupported';
+  return Notification.permission; // granted / denied / default
+}
+function requestPerm(silent) {
+  /* APK 版：按「通知 → 精确闹钟 → 电池优化」顺序逐项引导 —— 缺任何一项都可能到点不响 */
+  if (NATIVE) {
+    var inf = nativeCaps();
+    if (!inf.notify) { NATIVE.requestNotificationPermission(); return; }
+    if (!inf.exact) { NATIVE.requestExactAlarm(); return; }
+    if (!inf.battery) { NATIVE.requestIgnoreBattery(); return; }
+    if (!silent) toast('系统闹钟已就绪，关掉 App 也会准时提醒', '✅');
+    return;
+  }
+  if (typeof Notification === 'undefined') { if (!silent) toast('此浏览器不支持系统通知，App 内横幅仍可用', 'ℹ️'); return; }
+  Notification.requestPermission().then(function (p) {
+    S.settings.notifyOff = (p !== 'granted');
+    save(); renderBell();
+    if (p === 'granted') { toast('通知已开启', '🔔'); alertOut('通知已开启', '上课前与作业截止前都会提醒你', 'perm-ok'); }
+    else if (p === 'denied') toast('通知被拒绝，可在浏览器设置里重新允许', '🚫');
+  }).catch(function () { });
+}
+function renderBell() {
+  var off = $('#bellOff');
+  var p = permState();
+  off.hidden = !(p !== 'granted' || S.settings.notifyOff);
+}
+
+/* ------------------------------ 渲染：课表 ------------------------------ */
+function renderAll() {
+  renderTop(); renderSchedule(); renderAgenda(); renderTasks(); renderSettings(); renderBadge(); renderBell();
+}
+function renderTop() {
+  var w = UI.week, d = new Date();
+  $('#tbTitle').textContent = '第 ' + w + ' 周';
+  $('#tbSub').textContent = WD[(d.getDay() + 6) % 7] + ' · ' + fmtDate(d) + (w === currentWeek() ? ' · 本周' : '');
+  var a = weekStartDate(w), b = addDays(a, 6);
+  $('#wLabel').textContent = '第 ' + w + ' 周 · ' + parityText(w) + (w === currentWeek() ? '（本周）' : '');
+  $('#wRange').textContent = (a.getMonth() + 1) + '/' + a.getDate() + ' – ' + (b.getMonth() + 1) + '/' + b.getDate();
+  $('#wPrev').disabled = w <= 1;
+  $('#wNext').disabled = w >= S.settings.weeks;
+}
+function renderSchedule() {
+  var wrap = $('#gridWrap'), nth = S.settings.slots.length, w = UI.week;
+  var blocks = courseBlocks(w), today = today0();
+
+  if (!S.courses.length) {
+    wrap.innerHTML =
+      '<div class="empty-grid"><span class="big">📚</span><b>还没有课程</b><br>' +
+      '先设置开学第一周的周一，再把课加进来。<br>' +
+      '<button data-act="newCourse">添加第一门课</button></div>';
+    return;
+  }
+
+  /* 一节的高度 = 2 × per（含零高间隔行），要让 5 节尽量在一屏内放得下：
+     可用高度 = 视口高 - 顶部栏/周次栏/提示条/底部导航/提示文字 ≈ 300px */
+  var per = Math.max(46, Math.min(96, Math.round((window.innerHeight - 300) / nth)));
+  var html = '<div class="g-grid">';
+
+  /* 表头：整行跨满所有列（grid-column:1/-1），里面自己再分 1+7 列 */
+  html += '<div class="g-headgroup" style="grid-column:1/-1;grid-row:1">';
+  html += '<div class="g-corner"><span>' + nth + ' 节</span></div>';
+  for (var dw = 0; dw < 7; dw++) {
+    var dt = addDays(weekStartDate(w), dw);
+    var isToday = dt.getTime() === today.getTime();
+    var mm = dt.getMonth() + 1, dd = dt.getDate();
+    var lab = dd === 1 ? mm + '月' : String(dd);
+    html += '<div class="g-head' + (isToday ? ' today' : '') + (dw >= 5 ? ' we' : '') + '">' +
+      '<b>' + WD_S[dw] + '</b><span>' + lab + '</span></div>';
+  }
+  html += '</div>';
+
+  /* 每节占 2 行：奇数行放「节次+时间」，偶数行是零高间隔行（让课程块跨 2 行正好吃掉整节高度）。
+     所有格子都显式写出 grid-row，不依赖 auto-placement
+     （曾经只写 span 2 没写起始行，被自动放置到第 1 行，导致整行错位、表头塌陷）。 */
+  var periodH = per * 2;
+  for (var i = 1; i <= nth; i++) {
+    var t = S.settings.slots[i - 1] || { s: '', e: '' };
+    var rA = 2 + (i - 1) * 2, rB = rA + 1;
+    html += '<div class="g-space" style="grid-column:1/-1;grid-row:' + rB + '"></div>';
+    html += '<div class="g-time" style="grid-column:1;grid-row:' + rA + ';height:' + periodH + 'px">' +
+      '<b>' + esc(t.s) + '</b><span>' + esc(t.e) + '</span></div>';
+    for (var d = 1; d <= 7; d++) {
+      var isTd = dateOfSlot(w, d).getTime() === today.getTime();
+      html += '<div class="g-cell' + (isTd ? ' today' : '') + (d >= 6 ? ' weekend' : '') +
+        '" style="grid-column:' + (d + 1) + ';grid-row:' + rA + ';height:' + periodH + 'px"' +
+        ' data-act="cell" data-day="' + d + '" data-slot="' + i + '"></div>';
+    }
+  }
+
+  /* 课程块：列 = 星期+1，行从第 2 行开始，每节占 2 行 */
+  var nmin = nowMin();
+  blocks.forEach(function (b) {
+    var col = b.day + 1;
+    var rStart = 2 + (b.from - 1) * 2;
+    var span = (b.to - b.from + 1) * 2;
+    var isNow = b.date.getTime() === today.getTime() && nmin >= parseHM(b.start) && nmin < parseHM(b.end);
+    html += '<div class="crs' + (isNow ? ' now' : '') + '"' +
+      ' style="grid-column:' + col + ';grid-row:' + rStart + ' / span ' + span + ';' +
+      'background:linear-gradient(160deg,' + hexA(b.color, .18) + ',' + hexA(b.color, .07) + ');border-left-color:' + b.color + '"' +
+      ' data-act="editCourse" data-id="' + b.id + '"' +
+      ' title="' + esc(b.name + ' ' + b.start + '-' + b.end) + '">' +
+      '<b>' + esc(b.name) + '</b>' +
+      (b.room ? '<small>📍' + esc(b.room) + '</small>' : '') +
+      (b.teacher ? '<small>👤' + esc(b.teacher) + '</small>' : '') +
+      '<em>' + esc(b.start) + '-' + esc(b.end) + '</em>' +
+      '</div>';
+  });
+
+  html += '</div>';
+  wrap.innerHTML = html;
+}
+function hexA(hex, a) {
+  var h = String(hex || '#6366f1').replace('#', '');
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  var r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+}
+
+/* ------------------------------ 渲染：日程 ------------------------------ */
+function renderAgenda() {
+  var el = $('#page-agenda'), today = today0(), w = currentWeek();
+  var dt = new Date();
+  var mine = courseBlocks(w).filter(function (b) { return b.date.getTime() === today.getTime(); })
+    .sort(function (a, b) { return a.from - b.from; });
+  var underway = mine.filter(function (b) { return nowMin() >= parseHM(b.start) && nowMin() < parseHM(b.end); });
+  var pending = S.tasks.filter(function (t) { return !t.done && taskDT(t); })
+    .sort(function (a, b) { return taskDT(a) - taskDT(b); });
+  var ddl7 = pending.filter(function (t) { return taskDT(t) - Date.now() < 7 * DAY; });
+
+  var html = '';
+  html += '<div class="day-head"><b>' + fmtDate(dt) + '</b><span>' + WD[(dt.getDay() + 6) % 7] + ' · 第 ' + w + ' 周</span></div>';
+
+  html += '<div class="stat-row">' +
+    '<div class="stat"><b>' + mine.length + '</b><span>今日课程</span></div>' +
+    '<div class="stat"><b>' + pending.length + '</b><span>待办作业</span></div>' +
+    '<div class="stat"><b>' + (ddl7.length || 0) + '</b><span>7 天内截止</span></div>' +
+    '</div>';
+
+  /* 接下来的提醒：具体到点，可以对着核对 */
+  var nrs = nextReminders();
+  if (nrs.length) {
+    html += '<div class="card"><div class="card-head"><h3>' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.5a6 6 0 1 0-12 0c0 5-2 6.5-2 6.5h16s-2-1.5-2-6.5"/><path d="M10.3 19a2 2 0 0 0 3.4 0"/></svg>' +
+      '接下来的提醒</h3><span class="tag new">' + nrs.length + ' 条</span></div>';
+    nrs.slice(0, 4).forEach(function (r) {
+      var mins = Math.round((r.trig - Date.now()) / 60000);
+      var when = r.trig < Date.now() ? '<span class="countdown" style="color:var(--danger)">已到点，打开就会响</span>'
+        : mins < 60 ? '<span class="countdown" style="color:var(--indigo-d)">' + mins + ' 分钟后</span>'
+          : '<span>' + (r.trig < Date.now() + DAY ? '今天 ' : '明天 ') + fmtClock(new Date(r.trig)) + '</span>';
+      html += '<div class="cls-item"><i class="bar" style="background:' + (r.kind === 'cls' ? 'var(--indigo)' : PRIOS.filter(function (p) { return p.v === r.priority; })[0].c) + '"></i>' +
+        '<div class="ci-main"><b>' + (r.kind === 'cls' ? '🔔 ' : '⏰ ') + esc(r.name) + '</b>' +
+        '<p><i>' + esc(r.timeLabel) + '</i>' + (r.extra ? '<i>' + esc(r.extra) + '</i>' : '') + '</p></div>' +
+        '<div class="ci-time">' + when + '</div></div>';
+    });
+    html += '<div class="hint" style="margin-top:8px">提醒需要 App 在后台运行（或从主屏幕打开）。想要 100% 可靠，请在设置里「导出到系统日历」。</div></div>';
+  }
+
+  /* 今日课程 */
+  html += '<div class="card"><div class="card-head"><h3>' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>' +
+    '今日课程</h3>' + (underway.length ? '<span class="tag now">正在上课</span>' : '') + '</div>';
+  if (!mine.length) {
+    html += '<div class="empty" style="padding:18px 0"><span class="big">🌤️</span>今天没有课，安排点作业吧</div>';
+  } else {
+    mine.forEach(function (b) {
+      var isNow = nowMin() >= parseHM(b.start) && nowMin() < parseHM(b.end);
+      var isDone = nowMin() >= parseHM(b.end);
+      var cnt = '';
+      if (isNow) cnt = '<span class="countdown">还剩 ' + humanGap(hmToDate(today, b.end) - Date.now()) + '</span>';
+      else if (!isDone) cnt = '<span class="countdown" style="color:var(--indigo-d)">' + humanGap(hmToDate(today, b.start) - Date.now()) + '后上课</span>';
+      html += '<div class="cls-item' + (isNow ? ' is-now' : '') + (isDone ? ' is-done' : '') + '">' +
+        '<i class="bar" style="background:' + b.color + '"></i>' +
+        '<div class="ci-main"><b>' + esc(b.name) + ' ' + (isNow ? '<span class="tag now">上课中</span>' : isDone ? '<span class="tag done">已下课</span>' : '') + '</b>' +
+        '<p>' + (b.room ? '<i>📍' + esc(b.room) + '</i>' : '') + (b.teacher ? '<i>👤' + esc(b.teacher) + '</i>' : '') +
+        '<i>第 ' + b.from + (b.to !== b.from ? '-' + b.to : '') + ' 节</i></p>' +
+        (cnt ? '<p>' + cnt + '</p>' : '') + '</div>' +
+        '<div class="ci-time"><b>' + b.start + '</b>' + b.end + '</div></div>';
+    });
+  }
+  html += '</div>';
+
+  /* 最近截止的作业 */
+  html += '<div class="card"><div class="card-head"><h3>' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6.2l1.2 1.3L7.6 5M4 12.2l1.2 1.3L7.6 11"/></svg>' +
+    '最近截止</h3><button class="btn" style="padding:6px 12px;font-size:12.5px" data-act="newTask">+ 作业</button></div>';
+  if (!pending.length) {
+    html += '<div class="empty" style="padding:18px 0"><span class="big">🎉</span>没有待办作业，轻松一下</div>';
+  } else {
+    pending.slice(0, 5).forEach(function (t) { html += taskRow(t, true); });
+    if (pending.length > 5) html += '<button class="fab-add" data-act="go" data-page="tasks">查看全部 ' + pending.length + ' 项作业</button>';
+  }
+  html += '</div>';
+
+  /* 未来 7 天课程 */
+  html += '<div class="card"><div class="card-head"><h3>' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16" rx="3"/><path d="M3 9.5h18M8 3v3M16 3v3"/></svg>' +
+    '未来 7 天课程</h3></div>';
+  var up = courseBlocks(w).filter(function (b) { return b.date.getTime() > today.getTime() && b.date.getTime() <= addDays(today, 7).getTime(); });
+  if (w + 1 <= S.settings.weeks) {
+    up = up.concat(courseBlocks(w + 1).filter(function (b) { return b.date.getTime() > today.getTime() && b.date.getTime() <= addDays(today, 7).getTime(); }));
+  }
+  up.sort(function (a, b) { return a.date - b.date || a.from - b.from; });
+  if (!up.length) html += '<div class="empty" style="padding:16px 0">未来一周没有课</div>';
+  else {
+    up.slice(0, 12).forEach(function (b) {
+      html += '<div class="cls-item"><i class="bar" style="background:' + b.color + '"></i>' +
+        '<div class="ci-main"><b>' + esc(b.name) + '</b><p>' +
+        '<i>' + (b.date.getMonth() + 1) + '/' + b.date.getDate() + ' ' + WD[b.day - 1] + '</i>' +
+        (b.room ? '<i>📍' + esc(b.room) + '</i>' : '') +
+        '<i>第 ' + b.from + (b.to !== b.from ? '-' + b.to : '') + ' 节</i></p></div>' +
+        '<div class="ci-time"><b>' + b.start + '</b>' + b.end + '</div></div>';
+    });
+  }
+  html += '</div>';
+
+  if (permState() === 'unsupported') {
+    html += '<div class="perm no" style="margin-top:4px">⚠️ 当前浏览器不支持系统通知：<b>请把本站添加到主屏幕后从桌面图标打开</b>（iOS 需 16.4+），App 内提醒横幅同样会提示。</div>';
+  }
+  el.innerHTML = html;
+}
+function taskRow(t, compact) {
+  var dt = taskDT(t), now = Date.now(), left = dt ? dt - now : 0;
+  var p = PRIOS.filter(function (x) { return x.v === t.prio; })[0] || PRIOS[2];
+  var cls = t.done ? '' : (left < 0 ? 'over' : left < 24 * 3600000 ? 'soon' : '');
+  var tag = t.done ? '<span class="tag done">已完成</span>'
+    : left < 0 ? '<span class="tag hot">已逾期</span>'
+      : left < 24 * 3600000 ? '<span class="tag soon">今天/明天截止</span>' : '';
+  var prog = t.progress || 0;
+  return '<div class="task' + (t.done ? ' done' : '') + '" style="--pc:' + p.c + '" data-id="' + t.id + '">' +
+    '<button class="check" data-act="toggleTask" data-id="' + t.id + '" aria-label="完成">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg></button>' +
+    '<div class="tk-main"><b>' + esc(t.title) + '</b>' +
+    '<div class="tk-meta">' +
+    '<span style="color:' + p.c + ';font-weight:700">' + p.t + '</span>' +
+    (courseName(t.courseId) ? '<span>📘' + esc(courseName(t.courseId)) + '</span>' : '') +
+    (dt ? '<span class="ddl ' + cls + '" data-cd="' + (dt.getTime()) + '">' + (t.done ? '截止 ' + fmtDate(dt) + ' ' + fmtClock(dt) : shortGap(left) + ' 后截止') + '</span>' : '<span>未设截止</span>') +
+    tag + '</div>' +
+    (!compact || prog ? '<div class="progress"><i style="width:' + prog + '%"></i></div>' : '') +
+    '</div>' +
+    '<button class="tk-del" data-act="editTask" data-id="' + t.id + '">✎ 编辑</button>' +
+    '</div>';
+}
+
+/* ------------------------------ 渲染：作业 ------------------------------ */
+function renderTasks() {
+  var el = $('#page-tasks'), now = Date.now();
+  var all = S.tasks.slice();
+  var list = all.filter(function (t) {
+    if (UI.courseFilter && t.courseId !== UI.courseFilter) return false;
+    var dt = taskDT(t);
+    if (UI.mode === 'undone') return !t.done;
+    if (UI.mode === 'done') return !!t.done;
+    if (UI.mode === 'today') return !t.done && dt && dt.getTime() - now < DAY;
+    if (UI.mode === 'week') return !t.done && dt && dt.getTime() - now < 7 * DAY;
+    return true;
+  });
+  list.sort(function (a, b) {
+    if (UI.sort === 'prio') return (a.done - b.done) || (a.prio - b.prio) || (taskDT(a) - taskDT(b));
+    if (UI.sort === 'course') return (a.done - b.done) || (courseName(a.courseId) || 'zzz').localeCompare(courseName(b.courseId) || 'zzz') || (taskDT(a) - taskDT(b));
+    if (UI.sort === 'created') return (a.done - b.done) || (b.created - a.created);
+    var da = taskDT(a), db = taskDT(b);
+    return (a.done - b.done) || ((da ? da.getTime() : Infinity) - (db ? db.getTime() : Infinity));
+  });
+
+  var cnt = { all: all.length, undone: all.filter(function (t) { return !t.done; }).length, done: all.filter(function (t) { return t.done; }).length };
+  var overdue = all.filter(function (t) { return !t.done && taskDT(t) && taskDT(t) < now; }).length;
+
+  var html = '';
+  html += '<div class="seg">' +
+    segBtn('undone', '待完成', cnt.undone) + segBtn('today', '今天到期') + segBtn('week', '7 天内') + segBtn('done', '已完成', cnt.done) + segBtn('all', '全部', cnt.all) +
+    '</div>';
+
+  if (overdue) html += '<div class="perm no">🚨 有 <b>' + overdue + '</b> 项作业已逾期，先处理它们。</div>';
+
+  html += '<div class="card-head" style="margin:0 4px 8px"><h3 style="font-size:13px;color:var(--sub)">' +
+    '共 ' + list.length + ' 项</h3><div style="display:flex;gap:6px">' +
+    '<select id="sortSel" style="background:var(--card);border:1px solid var(--line);border-radius:9px;padding:6px 8px;font-size:12.5px">' +
+    opt('ddl', '按截止时间', UI.sort) + opt('prio', '按优先级', UI.sort) + opt('course', '按课程', UI.sort) + opt('created', '按添加时间', UI.sort) +
+    '</select>' +
+    '<select id="crsSel" style="background:var(--card);border:1px solid var(--line);border-radius:9px;padding:6px 8px;font-size:12.5px;max-width:130px">' +
+    '<option value="">全部课程</option>' +
+    S.courses.map(function (c) { return '<option value="' + c.id + '"' + (UI.courseFilter === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>'; }).join('') +
+    '</select></div></div>';
+
+  if (!list.length) {
+    html += '<div class="empty"><span class="big">📝</span>' +
+      (UI.mode === 'done' ? '还没有已完成的作业' : UI.mode === 'undone' ? '没有待办作业，太棒了' : '这个筛选下没有作业') + '</div>';
+  } else {
+    list.forEach(function (t) { html += taskRow(t, false); });
+  }
+  html += '<button class="fab-add" data-act="newTask">+ 添加作业 / 待办</button>';
+  el.innerHTML = html;
+}
+function segBtn(v, t, n) {
+  return '<button class="' + (UI.mode === v ? 'on' : '') + '" data-act="mode" data-mode="' + v + '">' + t + (n != null ? '<i>' + n + '</i>' : '') + '</button>';
+}
+function opt(v, t, cur) { return '<option value="' + v + '"' + (cur === v ? ' selected' : '') + '>' + t + '</option>'; }
+function renderBadge() {
+  var n = S.tasks.filter(function (t) {
+    if (t.done) return false;
+    var dt = taskDT(t);
+    return dt && dt.getTime() - Date.now() < 7 * DAY;
+  }).length;
+  var b = $('#tabBadge');
+  b.hidden = !n; b.textContent = n > 99 ? '99+' : n;
+}
+
+/* ------------------------------ 渲染：设置 ------------------------------ */
+function renderSettings() {
+  var el = $('#page-settings'), st = S.settings, p = permState();
+  var nat = NATIVE ? nativeCaps() : null;
+  var permCls = NATIVE
+    ? ((nat.notify && nat.exact && nat.battery) ? 'ok' : (!nat.notify || !nat.exact) ? 'no' : '')
+    : (p === 'granted' && !st.notifyOff ? 'ok' : p === 'denied' || p === 'unsupported' ? 'no' : '');
+  var permTxt = NATIVE ? nativeHintText()
+    : p === 'granted' && !st.notifyOff ? '✅ 系统通知已开启，到点会弹出通知（含声音与震动）'
+    : p === 'denied' ? '🚫 通知被浏览器拒绝：请点浏览器地址栏左侧的锁形图标 → 通知 → 允许，然后刷新'
+      : p === 'unsupported' ? '⚠️ 当前环境不支持系统通知：请「添加到主屏幕」后从桌面图标打开（iOS 需 16.4+），或改用下方的「导出日历」'
+        : '💡 点下方按钮开启系统通知，这样不在 App 里也能收到提醒';
+
+  var html = '';
+  html += '<div class="section-title">学期</div><div class="card">' +
+    row('开学第一周的周一', '用于推算当前第几周', '<input type="date" id="setStart" value="' + st.semesterStart + '">') +
+    row('学期总周数', '', '<input type="number" id="setWeeks" min="1" max="30" value="' + st.weeks + '" style="width:86px">') +
+    '<div class="hint">今天是第 <b>' + currentWeek() + '</b> 周（' + WD[(new Date().getDay() + 6) % 7] + '），按当前设定算 <b>' + parityText(currentWeek()) + '</b>。若与学校不一致，调整上面的日期即可。</div>' +
+    '</div>';
+
+  /* 单双周对齐：各校「第 1 周算单周还是双周」不同，这里一键翻转 */
+  html += '<div class="section-title">单双周对齐</div><div class="card">' +
+    '<div class="frow"><div class="fl"><b>第 1 周算</b><span>若课表单双周整排反了，点这里翻转</span></div>' +
+    '<div class="seg-inline" id="paritySeg" style="flex:0 0 auto;min-width:150px">' +
+    '<button data-parity="0" class="' + ((st.parityShift || 0) === 0 ? 'on' : '') + '">单周</button>' +
+    '<button data-parity="1" class="' + ((st.parityShift || 0) === 1 ? 'on' : '') + '">双周</button>' +
+    '</div></div>' +
+    '<div class="hint">当前：第 1 周算 <b>' + ((st.parityShift || 0) === 1 ? '双周' : '单周') + '</b>，所以第 ' + currentWeek() + ' 周是 <b>' + parityText(currentWeek()) + '</b>。' +
+    '点上面按钮可以整表翻转（课程、日期、周次编号都不变，只改单双周的对应关系）。</div>' +
+    '</div>';
+
+  html += '<div class="section-title">上课时间</div><div class="card"><div id="slotList">';
+  st.slots.forEach(function (s, i) {
+    html += '<div class="slot-row"><span class="no">第 ' + (i + 1) + ' 节</span>' +
+      '<input type="time" data-slot-s="' + i + '" value="' + s.s + '"><span class="dash">—</span>' +
+      '<input type="time" data-slot-e="' + i + '" value="' + s.e + '"></div>';
+  });
+  html += '</div><div class="btn-row">' +
+    '<button class="btn" id="slotAdd">+ 增加一节</button>' +
+    '<button class="btn danger" id="slotDel">− 删除最后一节</button>' +
+    '</div><div class="btn-row"><button class="btn ghost block" id="slotReset">恢复默认时间（8+2 节）</button></div>' +
+    '<div class="hint" style="margin-top:8px">共 ' + st.slots.length + ' 节。修改后课表左侧时间与提醒时间会自动更新。</div></div>';
+
+  html += '<div class="section-title">提醒</div><div class="card">' +
+    '<div class="perm ' + permCls + '">' + permTxt + '</div>' +
+    (NATIVE
+      ? '<div class="btn-row" style="margin-bottom:12px">' +
+        (!nat.notify ? '<button class="btn primary" id="natNotify">① 允许通知</button>' : '') +
+        (!nat.exact ? '<button class="btn primary" id="natExact">② 允许精确闹钟</button>' : '') +
+        (!nat.battery ? '<button class="btn" id="natBattery">③ 关闭电池优化</button>' : '') +
+        '<button class="btn" id="permTest">60 秒后测试系统闹钟</button>' +
+        '</div>' +
+        '<div class="btn-row" style="margin-bottom:12px">' +
+        '<button class="btn ghost" id="natResync">立即重排闹钟</button>' +
+        '<button class="btn ghost" id="natDiag">复制诊断信息</button>' +
+        '</div>' +
+        '<div class="hint">国产手机（华为 / 小米 / OPPO / vivo）还要到「手机管家 → 自启动 / 后台运行」里放行本应用，' +
+        '否则系统会在后台把闹钟掐掉。当前已排 <b>' + nat.pending + '</b> 条系统闹钟。</div>' +
+        '<div class="hint" style="margin-top:8px">🧪 <b>想确认它到底会不会响？</b>点「60 秒后测试系统闹钟」，' +
+        '然后<b>把 App 切到后台或直接关掉</b>，等 60 秒。弹出通知就说明整条链路通了 —— 这正是网页版做不到的事。</div>'
+      : '<div class="btn-row" style="margin-bottom:12px">' +
+        (p === 'granted' && !st.notifyOff ? '<button class="btn" id="permOff">关闭系统通知</button>' : '<button class="btn primary" id="permOn">开启系统通知</button>') +
+        '<button class="btn" id="permTest">发送测试提醒</button></div>') +
+    sw('上课提醒', '到点前弹通知', 'classRemind', st.classRemind) +
+    row('提前多久提醒', '建议 10–20 分钟', '<select id="setLead">' + LEADS.map(function (l) { return opt(String(l.v), l.t, String(st.classLead)); }).join('') + '</select>') +
+    sw('作业截止提醒', '按下面设定的时间点提醒', 'taskRemind', st.taskRemind) +
+    '<div class="field" style="margin:12px 0 4px"><label>作业提醒时间点（可多选）</label><div class="chips">' +
+    TASK_LEADS.map(function (l) { return '<button class="chip' + (st.taskLeads.indexOf(l.v) >= 0 ? ' on' : '') + '" data-act="lead" data-v="' + l.v + '">' + l.t + '</button>'; }).join('') +
+    '</div></div>' +
+    sw('逾期兜底提醒', '错过截止后再提示一次', 'overdueRemind', st.overdueRemind) +
+    sw('提醒声音', '播放提示音', 'ring', st.ring) +
+    sw('震动', '支持的手机可震动', 'vibrate', st.vibrate) +
+    '</div>';
+
+  html += '<div class="section-title">外观</div><div class="card">' +
+    '<div class="frow"><div class="fl"><b>主题</b><span>深色模式护眼，跟随系统自动切换</span></div>' +
+    '<div class="theme-seg">' +
+    ['auto', 'light', 'dark'].map(function (t) {
+      return '<button class="' + (st.theme === t ? 'on' : '') + '" data-act="theme" data-theme="' + t + '">' + ({ auto: '自动', light: '浅色', dark: '深色' })[t] + '</button>';
+    }).join('') + '</div></div></div>';
+
+  html += '<div class="section-title">数据与备份</div><div class="card">' +
+    '<div class="hint">数据只保存在这台手机' + (NATIVE ? '的应用里' : '的浏览器里') + '，不会上传。<b>' +
+    (NATIVE ? '卸载应用会连同数据一起删除' : '清理浏览器数据会丢失') + '</b>，建议偶尔导出备份。</div>' +
+    (SEED ? '<div class="btn-row" style="margin-top:10px"><button class="btn primary block" id="seedReload">载入我的专属课表' +
+      (seedVersion(SEED) > 1 ? '（第 ' + seedVersion(SEED) + ' 版）' : '') + '</button></div>' +
+      '<div class="hint" style="margin-top:6px">用云端最新的专属课表覆盖本机课表与学期设置（' +
+      ((SEED.courses || []).length) + ' 门课）。<b>已添加的作业和提醒不会被删除</b>，但本机对课表的改动会被覆盖。</div>' : '') +
+    '<div class="btn-row">' +
+    '<button class="btn" id="expJson">导出备份 (JSON)</button>' +
+    '<button class="btn" id="impJson">导入备份</button>' +
+    '</div><div class="btn-row">' +
+    '<button class="btn" id="expIcs">导出到系统日历</button>' +
+    '<button class="btn" id="expCsv">导出作业 (CSV)</button>' +
+    '</div><div class="btn-row">' +
+    (NATIVE ? '' : '<button class="btn" id="shareApp">分享 / 安装到桌面</button>') +
+    '<button class="btn danger" id="clearAll">清空全部数据</button>' +
+    '</div>' +
+    '<div class="hint" style="margin-top:10px">📅「导出到系统日历」会生成一个 .ics 文件，导入手机日历后由系统闹钟提醒，<b>不依赖 App 是否打开</b>，是最可靠的兜底方案。' +
+    '课程事件带「提前 ' + (st.classLead || 15) + ' 分钟」闹钟，作业按你选的提醒点各生成一次。</div>' +
+    '</div>';
+
+  html += '<div class="section-title">关于</div><div class="card">' +
+    '<div class="hint">「我的课表 · 作业待办」' + (NATIVE ? 'Android 客户端 v' + (nativeInfo.version || '1.0') : 'v1.0') +
+    ' · ' + (NATIVE ? '数据全部保存在本机，提醒由系统闹钟负责' : '纯本地 PWA，无账号、无网络请求') + '。<br>' +
+    '课程 ' + S.courses.length + ' 门 · 作业 ' + S.tasks.length + ' 项 · 待办提醒 ' + Object.keys(S.reminders).length + ' 条记录。</div>' +
+    '<div class="btn-row"><button class="btn ghost block" id="openWizard">重新运行新手引导</button></div>' +
+    '</div>';
+
+  el.innerHTML = html;
+}
+function row(label, sub, control) {
+  return '<div class="frow"><div class="fl"><b>' + label + '</b>' + (sub ? '<span>' + sub + '</span>' : '') + '</div>' + control + '</div>';
+}
+function sw(label, sub, key, on) {
+  return '<div class="frow"><div class="fl"><b>' + label + '</b>' + (sub ? '<span>' + sub + '</span>' : '') + '</div>' +
+    '<button class="switch' + (on ? ' on' : '') + '" data-act="sw" data-key="' + key + '" role="switch" aria-checked="' + !!on + '"></button></div>';
+}
+
+/* ------------------------------ 弹层：课程 ------------------------------ */
+function openCourseSheet(id, preset) {
+  var c = id ? courseById(id) : null;
+  var isEdit = !!c;
+  var col = c ? c.color : COLORS[S.courses.length % COLORS.length];
+  var days = c ? DAYS(c) : [{ day: (preset && preset.day) || 1, from: (preset && preset.from) || 1, to: (preset && preset.to) || Math.min(2, S.settings.slots.length) }];
+  var weekMode = (c && c.weeksMode) || 'all';
+  var draft = { color: col, days: JSON.parse(JSON.stringify(days)) };
+
+  var html = '<div class="sheet-grip"></div>' +
+    '<div class="sheet-title">' + (isEdit ? '编辑课程' : '添加课程') + '</div>' +
+    '<div class="sheet-sub">可添加多个时间段（如周一 1-2 节 + 周三 3-4 节），并支持单双周。</div>' +
+    '<div class="field"><label>课程名称 *</label><input type="text" id="fName" placeholder="如：高等数学" value="' + esc(c ? c.name : '') + '"></div>' +
+    '<div class="field-2">' +
+    '<div class="field"><label>任课老师</label><input type="text" id="fTeacher" placeholder="选填" value="' + esc(c ? c.teacher : '') + '"></div>' +
+    '<div class="field"><label>上课地点</label><input type="text" id="fRoom" placeholder="如：3 教 201" value="' + esc(c ? c.room : '') + '"></div></div>' +
+    '<div class="field"><label>颜色</label><div class="swatch" id="fColors">' +
+    COLORS.map(function (k) { return '<button data-color="' + k + '" class="' + (k === col ? 'on' : '') + '" style="background:' + k + '" aria-label="' + k + '"></button>'; }).join('') +
+    '</div></div>' +
+    '<div class="field"><label>时间段</label><div id="fDays"></div>' +
+    '<button class="fab-add" id="fAddDay" style="margin-top:8px">+ 再加一个时间段</button></div>' +
+    '<div id="fWeekWrap">' +
+    '<div class="field"><label>周次</label><div class="seg-inline" id="fWm">' +
+    [['all', '每周'], ['odd', '单周'], ['even', '双周'], ['custom', '自定义']].map(function (x) {
+      return '<button data-wm="' + x[0] + '" class="' + (weekMode === x[0] ? 'on' : '') + '">' + x[1] + '</button>';
+    }).join('') + '</div></div>' +
+    '<div class="field-2">' +
+    '<div class="field"><label>起始周</label><input type="number" id="fFrom" min="1" max="' + S.settings.weeks + '" value="' + ((c && c.fromWeek) || 1) + '"></div>' +
+    '<div class="field"><label>结束周</label><input type="number" id="fTo" min="1" max="' + S.settings.weeks + '" value="' + ((c && c.toWeek) || S.settings.weeks) + '"></div></div>' +
+    '<div class="field" id="fCustomWrap"' + (weekMode === 'custom' ? '' : ' hidden') + '><label>点选周次（可多选）</label><div class="chips">' +
+    weekChips(c) + '</div></div>' +
+    '</div>' +
+    '<div class="btn-row" style="margin-top:16px">' +
+    (isEdit ? '<button class="btn danger" id="fDel">删除课程</button>' : '<button class="btn ghost" data-act="close">取消</button>') +
+    '<button class="btn primary" id="fSave">保存</button></div>';
+
+  openSheet(html);
+  drawDays();
+
+  function weekChips(cc) {
+    var out = '';
+    for (var i = 1; i <= S.settings.weeks; i++) {
+      var on = cc && Array.isArray(cc.weeks) && cc.weeks.indexOf(i) >= 0;
+      out += '<button class="chip' + (on ? ' on' : '') + '" data-w="' + i + '">' + i + '</button>';
+    }
+    return out;
+  }
+  function slotOpts(cur, isEnd) {
+    return S.settings.slots.map(function (s, j) {
+      return '<option value="' + (j + 1) + '"' + (j + 1 === cur ? ' selected' : '') + '>' +
+        '第 ' + (j + 1) + ' 节 ' + (isEnd ? s.e : s.s) + '</option>';
+    }).join('');
+  }
+  function drawDays() {
+    $('#fDays').innerHTML = draft.days.map(function (g, i) {
+      return '<div style="background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:10px;margin-bottom:8px" data-g="' + i + '">' +
+        '<div class="field" style="margin:0 0 8px"><label>星期</label><div class="seg-inline">' +
+        WD_S.map(function (x, k) { return '<button data-gday="' + (k + 1) + '" class="' + (g.day === k + 1 ? 'on' : '') + '">' + x + '</button>'; }).join('') +
+        '</div></div>' +
+        '<div class="field-2" style="margin-bottom:0">' +
+        '<div class="field" style="margin:0"><label>开始</label><select data-gfrom>' + slotOpts(g.from, false) + '</select></div>' +
+        '<div class="field" style="margin:0"><label>结束</label><select data-gto>' + slotOpts(g.to, true) + '</select></div>' +
+        '</div>' +
+        (draft.days.length > 1 ? '<button class="btn danger block" style="margin-top:8px;padding:8px" data-gdel="' + i + '">删除这个时间段</button>' : '') +
+        '</div>';
+    }).join('');
+  }
+
+  $('#sheetBody').addEventListener('click', function (e) {
+    var t;
+    if (t = e.target.closest('[data-color]')) {
+      draft.color = t.dataset.color;
+      $$('#fColors button').forEach(function (b) { b.classList.toggle('on', b === t); });
+      return;
+    }
+    if (t = e.target.closest('[data-gday]')) {
+      var box = t.closest('[data-g]');
+      draft.days[+box.dataset.g].day = +t.dataset.gday;
+      $$('[data-gday]', box).forEach(function (b) { b.classList.toggle('on', b === t); });
+      return;
+    }
+    if (t = e.target.closest('[data-gdel]')) { draft.days.splice(+t.dataset.gdel, 1); drawDays(); return; }
+    if (t = e.target.closest('[data-wm]')) {
+      weekMode = t.dataset.wm;
+      $$('#fWm [data-wm]').forEach(function (b) { b.classList.toggle('on', b.dataset.wm === weekMode); });
+      $('#fCustomWrap').hidden = weekMode !== 'custom';
+      return;
+    }
+    if (t = e.target.closest('[data-w]')) { t.classList.toggle('on'); return; }
+  });
+  $('#sheetBody').addEventListener('change', function (e) {
+    var box = e.target.closest('[data-g]'); if (!box) return;
+    var i = +box.dataset.g;
+    if (e.target.hasAttribute('data-gfrom')) draft.days[i].from = +e.target.value;
+    if (e.target.hasAttribute('data-gto')) draft.days[i].to = +e.target.value;
+    if (draft.days[i].from > draft.days[i].to) {
+      var tmp = draft.days[i].from; draft.days[i].from = draft.days[i].to; draft.days[i].to = tmp;
+      drawDays();
+    }
+  });
+  $('#fAddDay').onclick = function () {
+    var last = draft.days[draft.days.length - 1] || { day: 1, from: 1, to: 2 };
+    draft.days.push({ day: last.day, from: last.from, to: last.to });
+    drawDays();
+  };
+  if (isEdit) $('#fDel').onclick = function () {
+    confirmSheet('删除课程「' + c.name + '」？关联的作业会保留，只是不再显示课程名。', function () {
+      S.courses = S.courses.filter(function (x) { return x.id !== c.id; });
+      save(); closeSheet(); renderAll(); toast('已删除课程', '🗑️');
+    });
+  };
+  $('#fSave').onclick = function () {
+    var name = $('#fName').value.trim();
+    if (!name) { toast('请填写课程名称', '✏️'); $('#fName').focus(); return; }
+    var from = Math.max(1, +$('#fFrom').value || 1);
+    var to = Math.min(S.settings.weeks, Math.max(from, +$('#fTo').value || S.settings.weeks));
+    var weeks = $$('#fCustomWrap .chip.on').map(function (b) { return +b.dataset.w; });
+    if (weekMode === 'custom' && !weeks.length) { toast('自定义周次至少要选一周', '✏️'); return; }
+    var obj = {
+      id: c ? c.id : uid(), name: name,
+      teacher: $('#fTeacher').value.trim(), room: $('#fRoom').value.trim(),
+      color: draft.color, days: draft.days.slice(), weeksMode: weekMode,
+      fromWeek: weekMode === 'custom' ? Math.min.apply(null, weeks) : from,
+      toWeek: weekMode === 'custom' ? Math.max.apply(null, weeks) : to,
+      weeks: weekMode === 'custom' ? weeks : []
+    };
+    if (c) S.courses = S.courses.map(function (x) { return x.id === c.id ? obj : x; });
+    else S.courses.push(obj);
+    save();
+    /* 新增课程后自动跳到该课所在的起始周，让用户立刻看到结果 */
+    if (!c) UI.week = clampWeek(obj.fromWeek || 1);
+    closeSheet(); renderAll();
+    toast(c ? '已保存修改' : '已添加「' + name + '」', '✅');
+  };
+}
+function clampWeek(w) { return Math.min(Math.max(1, w || 1), S.settings.weeks); }
+
+/* ------------------------------ 弹层：作业 ------------------------------ */
+function openTaskSheet(id, preset) {
+  var t = id ? S.tasks.filter(function (x) { return x.id === id; })[0] : null;
+  var isEdit = !!t;
+  var d = t ? t.ddlDate : (preset && preset.date) || toISO(addDays(today0(), 1));
+  var tm = t ? t.ddlTime : (preset && preset.time) || '23:59';
+  var leads = t ? (t.leads || []) : S.settings.taskLeads.slice();
+  var html = '<div class="sheet-grip"></div>' +
+    '<div class="sheet-title">' + (isEdit ? '编辑作业' : '添加作业 / 待办') + '</div>' +
+    '<div class="sheet-sub">设置截止时间后，App 会按你选的提醒点提醒你。</div>' +
+    '<div class="field"><label>内容 *</label><input type="text" id="tTitle" placeholder="如：交电路实验报告" value="' + esc(t ? t.title : '') + '"></div>' +
+    '<div class="field"><label>关联课程</label><select id="tCourse"><option value="">（不关联）</option>' +
+    S.courses.map(function (c) { return '<option value="' + c.id + '"' + (t && t.courseId === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>'; }).join('') +
+    '</select></div>' +
+    '<div class="field-2"><div class="field"><label>截止日期</label><input type="date" id="tDate" value="' + d + '"></div>' +
+    '<div class="field"><label>截止时间</label><input type="time" id="tTime" value="' + tm + '"></div></div>' +
+    '<div class="field"><label>优先级</label><div class="seg-inline" id="tPrio">' +
+    PRIOS.map(function (p) { return '<button data-prio="' + p.v + '" class="' + ((t ? t.prio : 3) === p.v ? 'on' : '') + '">' + p.t + '</button>'; }).join('') +
+    '</div></div>' +
+    '<div class="field"><label>完成度：<b id="tProgV">' + (t ? t.progress || 0 : 0) + '%</b></label>' +
+    '<input type="range" id="tProg" min="0" max="100" step="5" value="' + (t ? t.progress || 0 : 0) + '" style="width:100%;accent-color:var(--indigo)"></div>' +
+    '<div class="field"><label>提醒时间点（可多选）</label><div class="chips" id="tLeads">' +
+    TASK_LEADS.map(function (l) { return '<button class="chip' + (leads.indexOf(l.v) >= 0 ? ' on' : '') + '" data-lead="' + l.v + '">' + l.t + '</button>'; }).join('') +
+    '</div></div>' +
+    '<div class="field"><label>备注</label><textarea id="tNote" placeholder="选填：要求、提交方式等">' + esc(t ? t.note || '' : '') + '</textarea></div>' +
+    '<div class="btn-row" style="margin-top:16px">' +
+    (isEdit ? '<button class="btn danger" id="tDel">删除</button>' : '<button class="btn ghost" data-act="close">取消</button>') +
+    '<button class="btn primary" id="tSave">保存</button></div>';
+
+  openSheet(html);
+  $('#tProg').oninput = function () { $('#tProgV').textContent = this.value + '%'; };
+  $('#sheetBody').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-prio]');
+    if (b) { $$('#tPrio button').forEach(function (x) { x.classList.toggle('on', x === b); }); return; }
+    if (b = e.target.closest('[data-lead]')) b.classList.toggle('on');
+  });
+  if (isEdit) $('#tDel').onclick = function () {
+    confirmSheet('删除作业「' + t.title + '」？', function () {
+      S.tasks = S.tasks.filter(function (x) { return x.id !== t.id; });
+      save(); closeSheet(); renderAll(); toast('已删除', '🗑️');
+    });
+  };
+  $('#tSave').onclick = function () {
+    var title = $('#tTitle').value.trim();
+    if (!title) { toast('请填写内容', '✏️'); $('#tTitle').focus(); return; }
+    var date = $('#tDate').value, time = $('#tTime').value || '23:59';
+    if (!date) { toast('请选择截止日期', '📅'); return; }
+    var prio = +($('#tPrio .on') || { dataset: { prio: 3 } }).dataset.prio;
+    var prog = +$('#tProg').value;
+    var lds = $$('#tLeads .chip.on').map(function (b) { return +b.dataset.lead; });
+    if (lds.length === 1 && lds[0] === 0) lds = [];
+    var obj = {
+      id: t ? t.id : uid(), title: title, courseId: $('#tCourse').value,
+      ddlDate: date, ddlTime: time, prio: prio, progress: prog,
+      done: prog >= 100 ? true : (t ? t.done && prog >= 100 : false),
+      leads: lds, note: $('#tNote').value.trim(),
+      created: t ? t.created : Date.now(), doneAt: null
+    };
+    if (prog >= 100 && !obj.doneAt) obj.doneAt = Date.now();
+    if (prog < 100) { obj.done = false; obj.doneAt = null; }
+    if (t) S.tasks = S.tasks.map(function (x) { return x.id === t.id ? obj : x; });
+    else S.tasks.push(obj);
+    save(); closeSheet(); renderAll();
+    var dt = taskDT(obj);
+    toast(dt ? '已保存，' + humanGap(dt - Date.now()) + (dt > Date.now() ? '后截止' : '前已截止') : '已保存', '✅');
+  };
+}
+
+/* ------------------------------ 弹层：通用 ------------------------------ */
+function openSheet(html) {
+  $('#sheetBody').innerHTML = html;
+  $('#sheet').hidden = false;
+  document.body.style.overflow = 'hidden';
+  UI.open = true;
+}
+function closeSheet() {
+  $('#sheet').hidden = true;
+  $('#sheetBody').innerHTML = '';
+  document.body.style.overflow = '';
+  UI.open = false;
+}
+function confirmSheet(text, onOk, okText) {
+  openSheet('<div class="sheet-grip"></div><div class="sheet-title">请确认</div>' +
+    '<div class="sheet-sub">' + esc(text) + '</div>' +
+    '<div class="btn-row" style="margin-top:14px"><button class="btn ghost" data-act="close">取消</button>' +
+    '<button class="btn danger" id="cfOk">' + (okText || '确定删除') + '</button></div>');
+  $('#cfOk').onclick = function () { closeSheet(); setTimeout(onOk, 60); };
+}
+function openMenu() {
+  var pending = S.tasks.filter(function (t) { return !t.done; }).length;
+  var hot = S.tasks.filter(function (t) { return !t.done && taskDT(t) && taskDT(t) - Date.now() < DAY; });
+  var html = '<div class="sheet-grip"></div><div class="sheet-title">快速添加</div>' +
+    '<div class="sheet-sub">' + (hot.length ? '⚠️ ' + hot.length + ' 项作业在 24 小时内截止' : '今天 ' + WD[(new Date().getDay() + 6) % 7] + ' · 第 ' + currentWeek() + ' 周 · 待办 ' + pending + ' 项') + '</div>' +
+    '<button class="menu-item" data-act="newCourse"><span class="mi-ic">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4.5" width="18" height="16" rx="3"/><path d="M3 9.5h18M8 3v3M16 3v3M12 12.5v5M9.5 15h5"/></svg></span>' +
+    '<span class="mi-tx"><b>添加课程</b><span>课表上点空格也可以</span></span></button>' +
+    '<button class="menu-item" data-act="newTask"><span class="mi-ic">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6.2l1.2 1.3L7.6 5M4 12.2l1.2 1.3L7.6 11"/></svg></span>' +
+    '<span class="mi-tx"><b>添加作业 / 待办</b><span>可设截止时间与多个提醒点</span></span></button>';
+
+  if (hot.length) {
+    html += '<div class="section-title" style="margin:14px 4px 8px">即将截止</div><div class="quick-tasks">' +
+      hot.slice(0, 4).map(function (t) {
+        var p = PRIOS.filter(function (x) { return x.v === t.prio; })[0] || PRIOS[2];
+        var dt = taskDT(t);
+        return '<button class="qt" data-act="editTask" data-id="' + t.id + '"><i class="dot" style="background:' + p.c + '"></i>' +
+          '<span class="qt-tx"><b>' + esc(t.title) + '</b><span>' + (courseName(t.courseId) || '未关联课程') + '</span></span>' +
+          '<span class="ddl">' + fmtDate(dt) + ' ' + fmtClock(dt) + '</span></button>';
+      }).join('') + '</div>';
+  }
+  openSheet(html);
+}
+
+/* ------------------------------ 新手引导 ------------------------------ */
+function openWizard() {
+  var st = S.settings;
+  var step = 0;
+  function draw() {
+    var html = '<div class="sheet-grip"></div>';
+    if (step === 0) {
+      html += '<div class="sheet-title">👋 欢迎使用「我的课表」</div>' +
+        '<div class="sheet-sub">全部数据只存在这台手机里，不上传任何服务器。<br>花 30 秒设置一下，就能自动算出「现在是第几周」，并按时提醒你上课和交作业。</div>' +
+        '<div class="field"><label>开学第一周的周一</label><input type="date" id="wStart" value="' + st.semesterStart + '"></div>' +
+        '<div class="field"><label>本学期共几周</label><input type="number" id="wWeeks" min="1" max="30" value="' + st.weeks + '"></div>' +
+        '<div class="btn-row" style="margin-top:14px"><button class="btn ghost" data-act="close">稍后设置</button>' +
+        '<button class="btn primary" id="wNext1">下一步</button></div>';
+    } else if (step === 1) {
+      html += '<div class="sheet-title">⏰ 上下课时间</div>' +
+        '<div class="sheet-sub">默认是常见的 8+2 节。若你们学校不同，改一下开始/结束时间即可（会影响课表左侧时间与提醒）。</div>' +
+        '<div id="wSlots" style="max-height:44vh;overflow:auto">' +
+        st.slots.map(function (s, i) {
+          return '<div class="slot-row"><span class="no">第 ' + (i + 1) + ' 节</span>' +
+            '<input type="time" data-ws="' + i + '" value="' + s.s + '"><span class="dash">—</span>' +
+            '<input type="time" data-we="' + i + '" value="' + s.e + '"></div>';
+        }).join('') + '</div>' +
+        '<div class="btn-row" style="margin-top:14px"><button class="btn" id="wBack">上一步</button>' +
+        '<button class="btn primary" id="wNext2">下一步</button></div>';
+    } else {
+      var p = permState();
+      html += '<div class="sheet-title">🔔 开启提醒</div>' +
+        '<div class="sheet-sub">开启后，上课前 ' + st.classLead + ' 分钟与作业截止前会自动提醒。<br>' +
+        (p === 'granted' ? '系统通知已开启 ✅' : p === 'unsupported' ? '当前环境不支持系统通知，App 内横幅仍会提醒；<b>把本站添加到主屏幕</b>后即可获得完整提醒能力。' : '需要你点一下「允许」，浏览器才会授予通知权限。') + '</div>' +
+        '<div class="menu-item" style="border:0;padding:8px 0"><span class="mi-ic">📲</span><span class="mi-tx"><b>添加到主屏幕</b><span>iPhone：Safari 分享 → 添加到主屏幕；安卓：浏览器菜单 → 添加到主屏幕</span></span></div>' +
+        '<div class="btn-row" style="margin-top:14px">' +
+        (p === 'granted' ? '<button class="btn" id="wTest">发送测试提醒</button>' : '<button class="btn primary" id="wPerm">允许通知</button>') +
+        '<button class="btn ' + (p === 'granted' ? 'primary' : 'ghost') + '" id="wDone">开始使用</button></div>';
+    }
+    openSheet(html);
+    if (step === 0) $('#wNext1').onclick = function () {
+      var v = $('#wStart').value; if (!v) { toast('请选择日期', '📅'); return; }
+      S.settings.semesterStart = v;
+      S.settings.weeks = Math.min(30, Math.max(1, +$('#wWeeks').value || 20));
+      step = 1; draw();
+    };
+    if (step === 1) {
+      $('#wBack').onclick = function () { collectSlots(); step = 0; draw(); };
+      $('#wNext2').onclick = function () { collectSlots(); step = 2; draw(); };
+    }
+    if (step === 2) {
+      if ($('#wPerm')) $('#wPerm').onclick = function () { requestPerm(); setTimeout(draw, 400); };
+      if ($('#wTest')) $('#wTest').onclick = function () { alertOut('测试提醒', '如果你看到这条通知，说明提醒功能正常 🎉', 'test'); };
+      $('#wDone').onclick = function () {
+        S.settings.wizardDone = true;
+        if (!S.courses.length) { closeSheet(); step = 0; renderAll(); openCourseSheet(); return; }
+        save(); closeSheet(); renderAll(); toast('设置完成，开始使用吧', '🎉');
+      };
+    }
+    function collectSlots() {
+      $$('#wSlots input[data-ws]').forEach(function (inp) {
+        var i = +inp.dataset.ws;
+        S.settings.slots[i].s = inp.value || S.settings.slots[i].s;
+      });
+      $$('#wSlots input[data-we]').forEach(function (inp) {
+        var i = +inp.dataset.we;
+        S.settings.slots[i].e = inp.value || S.settings.slots[i].e;
+      });
+    }
+  }
+  draw();
+}
+
+/* ------------------------------ 导出 / 导入 ------------------------------ */
+function download(name, text, mime) {
+  /* APK 版：WebView 里「Blob + a[download]」的下载是**静默失效**的，点下去毫无反应。
+     改走原生通道写进系统「下载/我的课表/」，用户能在文件管理器里找到。 */
+  if (NATIVE) {
+    try {
+      var r = JSON.parse(NATIVE.saveFile(name, mime || 'text/plain', text) || '{}');
+      if (r && r.ok) toast('已保存到 ' + r.path, '⬇️');
+      else toast('导出失败：' + ((r && r.error) || '未知错误'), '⚠️');
+    } catch (e) { toast('导出失败，请重试', '⚠️'); }
+    return;
+  }
+  try {
+    var blob = new Blob(['\ufeff' + text], { type: (mime || 'text/plain') + ';charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+    toast('已导出 ' + name, '⬇️');
+  } catch (e) { toast('导出失败，请用桌面浏览器打开本页', '⚠️'); }
+}
+function exportJSON() {
+  download('我的课表备份-' + toISO(today0()) + '.json', JSON.stringify({ v: 1, exportedAt: new Date().toISOString(), courses: S.courses, tasks: S.tasks, settings: S.settings }, null, 2), 'application/json');
+}
+function importJSON() {
+  var inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.json,application/json';
+  inp.onchange = function () {
+    var f = inp.files && inp.files[0]; if (!f) return;
+    var r = new FileReader();
+    r.onload = function () {
+      var d = null;
+      try { d = JSON.parse(String(r.result).replace(/^\ufeff/, '')); } catch (e) { toast('文件格式不对', '⚠️'); return; }
+      if (!d || !Array.isArray(d.courses)) { toast('这不是本 App 的备份文件', '⚠️'); return; }
+      confirmSheet('导入将覆盖当前 ' + S.courses.length + ' 门课程、' + S.tasks.length + ' 项作业，确定？', function () {
+        S.courses = d.courses || [];
+        S.tasks = d.tasks || [];
+        S.settings = Object.assign({}, DEF_SETTINGS, d.settings || {});
+        S.reminders = {};
+        save(); renderAll(); toast('导入成功', '✅');
+      }, '确定导入');
+    };
+    r.readAsText(f);
+  };
+  inp.click();
+}
+function exportCSV() {
+  var rows = [['内容', '课程', '截止日期', '截止时间', '优先级', '完成度', '是否完成', '备注']];
+  S.tasks.slice().sort(function (a, b) { return a.prio - b.prio; }).forEach(function (t) {
+    rows.push([t.title, courseName(t.courseId), t.ddlDate, t.ddlTime, (PRIOS.filter(function (p) { return p.v === t.prio; })[0] || {}).t, (t.progress || 0) + '%', t.done ? '是' : '否', (t.note || '').replace(/[\r\n]+/g, ' ')]);
+  });
+  download('作业清单-' + toISO(today0()) + '.csv', rows.map(function (r) {
+    return r.map(function (c) { return '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"'; }).join(',');
+  }).join('\r\n'), 'text/csv');
+}
+function icsEsc(s) { return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+function icsDT(d) {
+  return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + 'T' + pad(d.getHours()) + pad(d.getMinutes()) + '00';
+}
+function exportICS() {
+  var st = S.settings, L = [], stamp = icsDT(new Date());
+  function fold(line) {
+    if (line.length <= 73) return line;
+    var out = line.slice(0, 73), rest = line.slice(73);
+    while (rest.length) { out += '\r\n ' + rest.slice(0, 72); rest = rest.slice(72); }
+    return out;
+  }
+  L.push('BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//class-schedule-app//CN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:我的课表');
+  /* 课程：复用提醒时间表的同一套展开逻辑（自动跳过已经上完的课） */
+  classTemplates().forEach(function (r) {
+    var s = r.start, e = r.end;
+    L.push('BEGIN:VEVENT',
+      'UID:crs-' + r.key.replace(/[^A-Za-z0-9]/g, '-') + '@class-schedule',
+      'DTSTAMP:' + stamp,
+      'DTSTART:' + icsDT(s),
+      'DTEND:' + icsDT(e),
+      'SUMMARY:' + icsEsc(r.name),
+      'LOCATION:' + icsEsc((r.extra.split(' · ')[0]) || ''),
+      'DESCRIPTION:' + icsEsc(r.timeLabel + (r.extra ? '  ' + r.extra : '')),
+      'BEGIN:VALARM', 'TRIGGER:-PT' + Math.max(0, st.classLead || 15) + 'M', 'ACTION:DISPLAY',
+      'DESCRIPTION:' + icsEsc('即将上课 · ' + r.name), 'END:VALARM',
+      'END:VEVENT');
+  });
+  /* 作业：只导出还没截止的 */
+  S.tasks.forEach(function (t) {
+    if (t.done) return;
+    var dt = taskDT(t); if (!dt || dt.getTime() < Date.now()) return;
+    var leads = (t.leads && t.leads.length ? t.leads : st.taskLeads);
+    var ev = ['BEGIN:VEVENT', 'UID:task-' + t.id + '@class-schedule', 'DTSTAMP:' + stamp,
+      'DTSTART:' + icsDT(dt), 'DTEND:' + icsDT(new Date(dt.getTime() + 30 * 60000)),
+      'SUMMARY:' + icsEsc('⏰ ' + t.title + '（截止）'),
+      'DESCRIPTION:' + icsEsc([courseName(t.courseId) ? '课程：' + courseName(t.courseId) : '', t.note || '',
+        '优先级：' + ((PRIOS.filter(function (p) { return p.v === t.prio; })[0] || {}).t || '')].filter(Boolean).join('\n'))];
+    leads.forEach(function (m) {
+      ev.push('BEGIN:VALARM', 'TRIGGER:-PT' + m + 'M', 'ACTION:DISPLAY',
+        'DESCRIPTION:' + icsEsc((m >= 1440 ? Math.round(m / 1440) + ' 天后' : Math.round(m / 60) + ' 小时后') + '截止 · ' + t.title), 'END:VALARM');
+    });
+    ev.push('END:VEVENT');
+    L.push.apply(L, ev);
+  });
+  L.push('END:VCALENDAR');
+  download('我的课表-' + toISO(today0()) + '.ics', L.map(fold).join('\r\n'), 'text/calendar');
+}
+
+/* ------------------------------ 交互事件 ------------------------------ */
+function goPage(p) {
+  UI.page = p;
+  ['schedule', 'agenda', 'tasks', 'settings'].forEach(function (x) {
+    $('#page-' + x).hidden = x !== p;
+  });
+  $$('.tab').forEach(function (b) { b.classList.toggle('is-active', b.dataset.page === p); });
+  if (p === 'schedule') { renderTop(); renderSchedule(); }
+  if (p === 'agenda') renderAgenda();
+  if (p === 'tasks') renderTasks();
+  if (p === 'settings') renderSettings();
+  window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
+}
+function setWeek(w) {
+  UI.week = clampWeek(w);
+  renderTop(); renderSchedule();
+  $('#tbTitle').animate ? $('#tbTitle').animate([{ opacity: .3 }, { opacity: 1 }], { duration: 180 }) : 0;
+}
+
+document.addEventListener('click', function (e) {
+  var t = e.target.closest('[data-act]');
+  var tab = e.target.closest('.tab');
+  if (tab) { goPage(tab.dataset.page); return; }
+  if (!t) return;
+  var act = t.dataset.act;
+  if (act === 'close') { closeSheet(); return; }
+  if (act === 'newCourse') { closeSheet(); setTimeout(function () { openCourseSheet(); }, 80); return; }
+  if (act === 'newTask') { closeSheet(); setTimeout(function () { openTaskSheet(); }, 80); return; }
+  if (act === 'editCourse') { openCourseSheet(t.dataset.id); return; }
+  if (act === 'editTask') { closeSheet(); setTimeout(function () { openTaskSheet(t.dataset.id); }, 80); return; }
+  if (act === 'cell') {
+    closeSheet();
+    setTimeout(function () {
+      openCourseSheet(null, { day: +t.dataset.day, from: +t.dataset.slot, to: Math.min(+t.dataset.slot + 1, S.settings.slots.length) });
+      var n = $('#fName');
+      if (n) setTimeout(function () { try { n.focus(); } catch (e) { } }, 180);
+    }, 80);
+    return;
+  }
+  if (act === 'toggleTask') { toggleTask(t.dataset.id); return; }
+  if (act === 'mode') { UI.mode = t.dataset.mode; renderTasks(); return; }
+  if (act === 'theme') { S.settings.theme = t.dataset.theme; save(); applyTheme(); renderSettings(); return; }
+  if (act === 'sw') {
+    var k = t.dataset.key;
+    S.settings[k] = !S.settings[k];
+    save(); t.classList.toggle('on', S.settings[k]);
+    t.setAttribute('aria-checked', S.settings[k]);
+    if (k === 'classRemind' || k === 'taskRemind') toast(S.settings[k] ? '已开启该提醒' : '已关闭该提醒', S.settings[k] ? '🔔' : '🔕');
+    if (k === 'ring' && S.settings[k]) beep();
+    if (k === 'vibrate' && S.settings[k]) buzz();
+    return;
+  }
+  if (act === 'lead') {
+    var v = +t.dataset.v, i = S.settings.taskLeads.indexOf(v);
+    if (i >= 0) S.settings.taskLeads.splice(i, 1); else S.settings.taskLeads.push(v);
+    S.settings.taskLeads.sort(function (a, b) { return b - a; });
+    save(); t.classList.toggle('on');
+    return;
+  }
+  if (act === 'go') { goPage(t.dataset.page); return; }
+});
+/* 点课表空格 = 直接新建课程并预填该位置（见 openCourseSheet 的 preset 参数） */
+function toggleTask(id) {
+  var t = S.tasks.filter(function (x) { return x.id === id; })[0];
+  if (!t) return;
+  t.done = !t.done;
+  t.progress = t.done ? 100 : 0;
+  t.doneAt = t.done ? Date.now() : null;
+  if (t.done) { clearTimeout(t._celebrate); toast('完成！' + (t.title.length > 10 ? '' : ' ' + t.title), '🎉'); }
+  save(); renderBadge();
+  if (UI.page === 'tasks') renderTasks();
+  if (UI.page === 'agenda') renderAgenda();
+}
+
+/* 表单控件（设置在每次 renderSettings 后重新绑定） */
+function bindSettings() {
+  var st = S.settings;
+  if ($('#setStart')) $('#setStart').onchange = function () { st.semesterStart = this.value || st.semesterStart; save(); renderAll(); toast('已更新学期开始日期', '📅'); };
+  if ($('#setWeeks')) $('#setWeeks').onchange = function () { st.weeks = Math.min(30, Math.max(1, +this.value || 20)); save(); UI.week = clampWeek(UI.week); renderAll(); };
+  if ($('#setLead')) $('#setLead').onchange = function () { st.classLead = +this.value; save(); renderSettings(); toast('课前提醒：' + this.options[this.selectedIndex].text, '⏰'); };
+  /* 单双周对齐翻转 */
+  $$('#paritySeg [data-parity]').forEach(function (b) {
+    b.onclick = function () {
+      var v = +b.dataset.parity;
+      if ((st.parityShift || 0) === v) return;
+      st.parityShift = v;
+      save();
+      UI.week = clampWeek(currentWeek());
+      renderAll();
+      toast('已切换：第 1 周算' + (v === 1 ? '双周' : '单周') + '，本周现在是' + parityText(currentWeek()), '🔁');
+    };
+  });
+  $$('[data-slot-s]').forEach(function (inp) {
+    inp.onchange = function () { st.slots[+inp.dataset.slotS].s = inp.value || st.slots[+inp.dataset.slotS].s; save(); renderSchedule(); };
+  });
+  $$('[data-slot-e]').forEach(function (inp) {
+    inp.onchange = function () { st.slots[+inp.dataset.slotE].e = inp.value || st.slots[+inp.dataset.slotE].e; save(); renderSchedule(); };
+  });
+  if ($('#slotAdd')) $('#slotAdd').onclick = function () {
+    var last = st.slots[st.slots.length - 1] || { s: '19:00', e: '19:45' };
+    var s = parseHM(last.s) + 60, e = parseHM(last.e) + 60;
+    st.slots.push({ s: pad(Math.floor(s / 60) % 24) + ':' + pad(s % 60), e: pad(Math.floor(e / 60) % 24) + ':' + pad(e % 60) });
+    save(); renderAll();
+  };
+  if ($('#slotDel')) $('#slotDel').onclick = function () {
+    if (st.slots.length <= 1) { toast('至少要保留一节', '⚠️'); return; }
+    var used = 0;
+    S.courses.forEach(function (c) { DAYS(c).forEach(function (g) { if (g.to >= st.slots.length) used++; }); });
+    confirmSheet('删除第 ' + st.slots.length + ' 节？' + (used ? '有 ' + used + ' 个时间段用到了它，会被一并调整。' : ''), function () {
+      st.slots.pop();
+      S.courses.forEach(function (c) {
+        c.days = DAYS(c).map(function (g) {
+          return { day: g.day, from: Math.min(g.from, st.slots.length), to: Math.min(g.to, st.slots.length) };
+        });
+      });
+      save(); renderAll();
+    }, '确定删除');
+  };
+  if ($('#slotReset')) $('#slotReset').onclick = function () {
+    confirmSheet('恢复默认的 10 节上下课时间？', function () {
+      st.slots = DEF_SETTINGS.slots.map(function (x) { return { s: x.s, e: x.e }; });
+      save(); renderAll(); toast('已恢复默认', '↩️');
+    }, '确定恢复');
+  };
+  if ($('#permOn')) $('#permOn').onclick = function () { requestPerm(); setTimeout(renderSettings, 500); };
+  if ($('#permOff')) $('#permOff').onclick = function () { st.notifyOff = true; save(); renderBell(); renderSettings(); toast('已关闭系统通知，App 内仍会提示', '🔕'); };
+  if ($('#permTest')) $('#permTest').onclick = function () {
+    /* APK 版：排一条真·系统闹钟，让用户切后台亲自验证「关掉 App 也会响」 */
+    if (NATIVE) { nativeTestAlarm(); return; }
+    if (permState() === 'default') { requestPerm(); }
+    alertOut('测试提醒 · 我的课表', '看到这条说明提醒正常：上课前 ' + st.classLead + ' 分钟、作业截止前会这样提醒你', 'test');
+  };
+  if ($('#expJson')) $('#expJson').onclick = exportJSON;
+  if ($('#seedReload')) $('#seedReload').onclick = function () {
+    confirmSheet('用最新的专属课表覆盖本机的课表与学期设置？\n\n（已添加的作业和提醒会保留，本机对课表的修改会被覆盖）', function () {
+      applySeedNow();
+    }, '载入专属课表');
+  };
+  if ($('#impJson')) $('#impJson').onclick = importJSON;
+  if ($('#expIcs')) $('#expIcs').onclick = exportICS;
+  if ($('#expCsv')) $('#expCsv').onclick = exportCSV;
+  if ($('#clearAll')) $('#clearAll').onclick = function () {
+    confirmSheet('清空后会删除全部课程、作业与设置，且无法恢复。建议先导出备份。', function () {
+      try { localStorage.removeItem(KEY); } catch (e) { }
+      load(); UI.week = currentWeek(); UI.mode = 'undone'; save(); renderAll();
+      toast('已清空', '🧹');
+    }, '确认清空');
+  };
+  if ($('#shareApp')) $('#shareApp').onclick = shareApp;
+  if ($('#openWizard')) $('#openWizard').onclick = openWizard;
+
+  /* APK 版专属：原生权限引导 + 手动重排闹钟 + 诊断信息 */
+  if (NATIVE) {
+    if ($('#natNotify')) $('#natNotify').onclick = function () { NATIVE.requestNotificationPermission(); setTimeout(renderSettings, 900); };
+    if ($('#natExact')) $('#natExact').onclick = function () { NATIVE.requestExactAlarm(); setTimeout(renderSettings, 900); };
+    if ($('#natBattery')) $('#natBattery').onclick = function () { NATIVE.requestIgnoreBattery(); setTimeout(renderSettings, 900); };
+    if ($('#natDiag')) $('#natDiag').onclick = copyNativeDiag;
+    if ($('#natResync')) $('#natResync').onclick = function () {
+      syncNativeNow(true);
+      renderSettings();
+      toast('已重排 ' + nativeCaps().pending + ' 条系统闹钟', '⏰');
+    };
+  }
+}
+function shareApp() {
+  var url = location.href;
+  if (navigator.share) {
+    navigator.share({ title: '我的课表 · 作业提醒', text: '手机课表 + 作业待办 + 定时提醒', url: url }).catch(function () { });
+    return;
+  }
+  openSheet('<div class="sheet-grip"></div><div class="sheet-title">安装到手机桌面</div>' +
+    '<div class="sheet-sub">把它当成 App 用，桌面会有独立图标，打开就是全屏，通知也更可靠。</div>' +
+    '<div class="menu-item"><span class="mi-ic">🍎</span><span class="mi-tx"><b>iPhone / iPad（需 iOS 16.4+）</b><span>Safari 打开本页 → 底部「分享」按钮 → 添加到主屏幕</span></span></div>' +
+    '<div class="menu-item"><span class="mi-ic">🤖</span><span class="mi-tx"><b>安卓</b><span>Chrome/Edge 打开 → 右上角「⋮」→ 添加到主屏幕 / 安装应用</span></span></div>' +
+    '<div class="menu-item"><span class="mi-ic">💻</span><span class="mi-tx"><b>电脑</b><span>Chrome/Edge 地址栏右侧「安装」图标，或菜单 → 应用 → 安装此站点</span></span></div>' +
+    '<div class="hint" style="margin-top:10px">当前地址：' + esc(url) + '<br>（本地文件 file:// 打开时通知与安装不可用，请用 http://localhost 或把文件放到手机能访问的目录）</div>' +
+    '<div class="btn-row" style="margin-top:14px"><button class="btn ghost block" data-act="close">知道了</button></div>');
+}
+
+/* ------------------------------ 主题 ------------------------------ */
+function applyTheme() {
+  var t = S.settings.theme;
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : t === 'light' ? 'light' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+}
+try {
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', function () { if (S.settings.theme === 'auto') applyTheme(); });
+} catch (e) { }
+
+/* ------------------------------ 手势：滑周 ------------------------------ */
+function bindGestures() {
+  var x0 = 0, y0 = 0, lock = null, moved = false;
+  document.addEventListener('touchstart', function (e) {
+    if (e.touches.length !== 1) return;
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; lock = null; moved = false;
+  }, { passive: true });
+  document.addEventListener('touchmove', function (e) {
+    if (e.touches.length !== 1) return;
+    var dx = e.touches[0].clientX - x0, dy = e.touches[0].clientY - y0;
+    if (Math.abs(dx) > 12 || Math.abs(dy) > 12) moved = true;
+    if (lock === null && (Math.abs(dx) > 14 || Math.abs(dy) > 14)) lock = Math.abs(dx) > Math.abs(dy) * 1.4 ? 'x' : 'y';
+  }, { passive: true });
+  document.addEventListener('touchend', function (e) {
+    if (UI.page !== 'schedule' || UI.open || !moved) return;
+    var dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
+    if (Math.abs(dx) < 60 || Math.abs(dy) > 70) return;
+    setWeek(UI.week + (dx < 0 ? 1 : -1));
+  }, { passive: true });
+  /* 桌面：左右方向键切周 */
+  document.addEventListener('keydown', function (e) {
+    if (UI.open) { if (e.key === 'Escape') closeSheet(); return; }
+    if (UI.page !== 'schedule') return;
+    if (e.key === 'ArrowLeft') setWeek(UI.week - 1);
+    if (e.key === 'ArrowRight') setWeek(UI.week + 1);
+  });
+}
+function bindStatic() {
+  $('#wPrev').onclick = function () { setWeek(UI.week - 1); };
+  $('#wNext').onclick = function () { setWeek(UI.week + 1); };
+  $('#wToday').onclick = function () { setWeek(currentWeek()); toast('已回到本周（第 ' + currentWeek() + ' 周）', '📅'); };
+  $('#wChip').onclick = function () {
+    var opts = [];
+    for (var i = 1; i <= S.settings.weeks; i++) opts.push('<button class="chip' + (i === UI.week ? ' on' : '') + '" data-act="jump" data-w="' + i + '">' + i + '</button>');
+    openSheet('<div class="sheet-grip"></div><div class="sheet-title">跳到第几周</div>' +
+      '<div class="sheet-sub">共 ' + S.settings.weeks + ' 周，今天是第 ' + currentWeek() + ' 周</div>' +
+      '<div class="chips">' + opts.join('') + '</div>' +
+      '<div class="btn-row" style="margin-top:16px"><button class="btn ghost block" data-act="close">取消</button></div>');
+    $('#sheetBody').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-act="jump"]');
+      if (b) { setWeek(+b.dataset.w); closeSheet(); }
+    });
+  };
+  $('#btnAdd').onclick = openMenu;
+  $('#btnBell').onclick = function () { goPage('settings'); setTimeout(function () { $('#permOn') && $('#permOn').scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 120); };
+  $('#bnClose').onclick = function () { $('#banner').hidden = true; };
+  $('#banner').onclick = function (e) { if (e.target.id !== 'bnClose') $('#banner').hidden = true; };
+  $('#sheet').addEventListener('click', function (e) { if (e.target.classList.contains('sheet-dim')) closeSheet(); });
+}
+/* 设置页的动态控件每次渲染后重新绑定 */
+var _renderSettings = renderSettings;
+renderSettings = function () { _renderSettings(); bindSettings(); };
+
+/* ------------------------------ 启动 ------------------------------ */
+function bindDocInputs() {
+  document.addEventListener('change', function (e) {
+    if (e.target.id === 'sortSel') { UI.sort = e.target.value; renderTasks(); }
+    if (e.target.id === 'crsSel') { UI.courseFilter = e.target.value; renderTasks(); }
+  });
+}
+function startTicker() {
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = setInterval(function () {
+    checkReminders(false);
+    /* 秒级倒计时 */
+    var now = Date.now();
+    $$('[data-cd]').forEach(function (el) {
+      var t = +el.dataset.cd;
+      if (isNaN(t)) return;
+      el.textContent = shortGap(t - now) + ' 后截止';
+      el.classList.toggle('over', t - now < 0);
+      el.classList.toggle('soon', t - now >= 0 && t - now < 86400000);
+    });
+    if (UI.page === 'agenda' && now % 30000 < 16000) { /* 日程页每 ~30s 重排一次以更新“还剩 x 分钟” */ }
+  }, 15000);
+  /* 每分钟更新日程页的“还剩/还有多久” */
+  setInterval(function () {
+    if (UI.page === 'agenda') renderAgenda();
+    if (UI.page === 'schedule') renderSchedule();
+    if (UI.page === 'settings') renderTop();
+  }, 60000);
+}
+function init() {
+  load();
+  applyTheme();
+  UI.week = clampWeek(currentWeek());
+  UI.mode = 'undone';
+  bindStatic(); bindGestures(); bindDocInputs();
+  renderAll();
+  startTicker();
+  setTimeout(function () { checkReminders(false); catchUp(); renderBell(); }, 1200);
+  /* 带了个人课表种子：跳过新手引导，改成一键开通知的欢迎条 */
+  if (UI.seeded && S.courses.length) {
+    setTimeout(function () {
+      pushBanner('已载入你的专属课表 · 共 ' + S.courses.length + ' 门课', '今天是第 ' + currentWeek() + ' 周（' + parityText(currentWeek()) + '）。点这里开启上课与作业提醒 →');
+      var b = $('#banner');
+      b.onclick = function (e) {
+        if (e.target.id === 'bnClose') return;
+        b.hidden = true;
+        if (permState() === 'granted') { toast('通知已开启', '🔔'); return; }
+        requestPerm();
+      };
+    }, 700);
+  } else if (UI.canApplySeed) {
+    /* 这台设备以前打开过旧版（那时还没有专属课表），或云端更新了专属课表 */
+    var isUpdate = !!UI.seedUpdated;
+    setTimeout(function () {
+      pushBanner(
+        isUpdate ? '专属课表有更新（第 ' + UI.seedUpdated.version + ' 版）' : '检测到你的专属课表',
+        '这台设备上次打开时还没有它。点这里一键载入' + (UI.seedOld && UI.seedOld.week ? '（今天是第 ' + UI.seedOld.week + ' 周）' : '') + '，'
+        + '你已添加的作业会保留。'
+      );
+      var b2 = $('#banner');
+      b2.onclick = function (e) {
+        if (e.target.id === 'bnClose') return;
+        b2.hidden = true;
+        confirmSheet(
+          isUpdate ? '载入第 ' + UI.seedUpdated.version + ' 版专属课表？' : '载入你的专属课表？',
+          function () { applySeedNow(); },
+          '载入'
+        );
+      };
+    }, 700);
+  } else if (!S.settings.wizardDone) {
+    setTimeout(openWizard, 600);
+  } else if (UI.seedSkipped) {
+    setTimeout(function () {
+      pushBanner('专属课表的日期已过期，未自动载入', UI.seedSkipped + '。可在设置里手动改学期日期，或点设置 → 导入备份。');
+    }, 700);
+  }
+  /* 回到前台时立刻补扫一次 */
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) { checkReminders(false); renderBell(); if (UI.page === 'agenda') renderAgenda(); if (UI.page === 'tasks') renderTasks(); }
+  });
+  window.addEventListener('focus', function () { checkReminders(false); });
+  /* Service Worker 注册（file:// 下会失败，忽略即可） */
+  if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function () { });
+    });
+  }
+  /* 安装提示（仅网页版；APK 本身就是一个应用，无需“添加到桌面”） */
+  if (!NATIVE) {
+    window.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();
+      UI.installEvt = e;
+      if (UI.noInstall) return;
+      toast('可添加到主屏幕，像 App 一样使用', '📲');
+    });
+  }
+
+  /* APK 版：直接把提醒交给系统闹钟 */
+  if (NATIVE) {
+    UI.noInstall = true;
+    setTimeout(function () {
+      nativeCaps();
+      mergeNativeFired();
+      syncNativeNow(true);
+      renderBell();
+      if (UI.page === 'settings') renderSettings();
+    }, 1400);
+  }
+}
+
+/* ==========================================================================
+   原生 APK 桥接层
+   --------------------------------------------------------------------------
+   仅当页面跑在 APK 自带的 WebView 里（window.CSApp 由原生注入）时生效，
+   在普通浏览器 / PWA 里整段空转，网页版行为一字不变。
+
+   分工：前端负责「算」——什么时候该提醒什么；原生负责「响」——到点弹系统通知。
+   所以课表、单双周、作业 DDL 这套算法只存在一份，两边永远不会算出两套结果。
+   ========================================================================== */
+var NATIVE = (typeof window !== 'undefined' && window.CSApp
+  && typeof window.CSApp.syncReminders === 'function') ? window.CSApp : null;
+
+var NATIVE_MAX = 400;            // 一次交给系统闹钟的最大条数（AlarmManager 单应用上限约 500）
+var nativeSyncTimer = null;
+var nativeSentJson = '';
+var nativeInfo = { native: false, exact: false, notify: false, battery: false, pending: 0, version: '', sdk: 0 };
+
+function nativeCaps() {
+  if (!NATIVE) return nativeInfo;
+  try {
+    var c = JSON.parse(NATIVE.capabilities() || '{}');
+    nativeInfo = {
+      native: !!c.native, exact: !!c.exact, notify: !!c.notify, battery: !!c.battery,
+      pending: +c.pending || 0, version: c.version || '', sdk: +c.sdk || 0
+    };
+  } catch (e) { }
+  return nativeInfo;
+}
+
+/* 把整个学期剩下的提醒点一次性交给系统 —— 即使用户几周不开 App，闹钟也不会断档。
+   数据来源是 classTemplates / upcomingTasks，与页面内提醒、预览列表完全同源。 */
+function nativePayload() {
+  if (!NATIVE || S.settings.notifyOff) return [];
+  var st = S.settings, now = Date.now(), out = [];
+  if (st.classRemind) {
+    classTemplates(st.weeks).forEach(function (r) {
+      if (r.trig <= now || !r.start) return;
+      var lead = Math.round((r.start.getTime() - r.trig) / 60000);
+      out.push({
+        key: r.key, kind: 'cls',
+        title: (lead > 0 ? '还有 ' + lead + ' 分钟上课 · ' : '该上课了 · ') + r.name,
+        body: r.timeLabel + (r.extra ? ' · ' + r.extra : ''),
+        trig: r.trig, ring: !!st.ring, vibrate: !!st.vibrate
+      });
+    });
+  }
+  if (st.taskRemind) {
+    upcomingTasks().forEach(function (r) {
+      if (r.trig <= now) return;
+      out.push({
+        key: r.key, kind: 'task',
+        title: '作业 ' + humanGap(r.start.getTime() - r.trig) + '后截止 · ' + r.name,
+        body: [r.extra, r.timeLabel].filter(Boolean).join(' · '),
+        trig: r.trig, ring: !!st.ring, vibrate: !!st.vibrate
+      });
+    });
+  }
+  out.sort(function (a, b) { return a.trig - b.trig; });
+  return out.slice(0, NATIVE_MAX);
+}
+
+function syncNativeNow(force) {
+  if (!NATIVE) return;
+  var payload;
+  try { payload = nativePayload(); } catch (e) { return; }
+  var json = JSON.stringify(payload);
+  if (!force && json === nativeSentJson) return;     // 内容没变就别反复折腾系统
+  var res = {};
+  try {
+    res = JSON.parse(NATIVE.syncReminders(json) || '{}');
+  } catch (e) { return; }
+  if (res && res.ok) nativeSentJson = json;
+  nativeCaps();
+  if (res && typeof res.scheduled === 'number') nativeInfo.pending = res.scheduled;
+  if (nativeInfo.pending > 0) S.settings.notifyOff = false;
+  if (UI.page === 'settings') renderSettings();
+}
+function scheduleNativeSync() {
+  if (!NATIVE) return;
+  clearTimeout(nativeSyncTimer);
+  nativeSyncTimer = setTimeout(function () { syncNativeNow(false); }, 1200);
+}
+
+/* 领走「原生已经弹过」的提醒 key，合并进自己的去重表 —— 否则 App 打开后会再弹一遍 */
+function mergeNativeFired() {
+  if (!NATIVE) return 0;
+  var n = 0;
+  try {
+    var keys = JSON.parse(NATIVE.takeFiredKeys() || '[]');
+    keys.forEach(function (k) {
+      if (k && !wasSent(k)) { S.reminders[String(k)] = Date.now(); n++; }
+    });
+  } catch (e) { }
+  if (n) { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } }
+  return n;
+}
+
+function nativeHintText() {
+  var inf = nativeCaps();
+  if (inf.notify && inf.exact && inf.battery) {
+    return '✅ 系统闹钟已就绪：<b>关掉 App、息屏、甚至重启手机</b>都会准时提醒（当前已排 ' + inf.pending + ' 条）。';
+  }
+  var miss = [];
+  if (!inf.notify) miss.push('「通知」');
+  if (!inf.exact) miss.push('「闹钟与提醒」');
+  if (!inf.battery) miss.push('「电池 → 不受限制」');
+  return '⚠️ 还差 ' + miss.join('、') + ' 未允许，<b>缺任何一项都可能导致到点不响</b>。点下方按钮逐项开启。' +
+    (inf.sdk >= 33 ? '' : '');
+}
+
+/* 让用户自己验证核心能力：排一条真·系统闹钟，然后切后台/关掉 App 等它响。
+   这是唯一能证明「关掉 App 也会提醒」的办法 —— 别人替不了，只能本人在自己手机上试。 */
+function nativeTestAlarm() {
+  if (!NATIVE) {
+    alertOut('测试提醒 · 我的课表', '看到这条说明提醒正常：上课前 ' + S.settings.classLead + ' 分钟、作业截止前会这样提醒你', 'test');
+    return;
+  }
+  var res = {};
+  try {
+    res = JSON.parse(NATIVE.scheduleTestAlarm(60, !!S.settings.ring, !!S.settings.vibrate) || '{}');
+  } catch (e) { }
+  if (res && res.ok) {
+    pushBanner('已排好一条 60 秒后的系统闹钟', '现在请把 App 切到后台或直接关掉（别停在这一页）。60 秒后弹出通知，就说明「关掉 App 也会响」真的生效了 ✅');
+  } else {
+    toast('测试闹钟没排上：' + ((res && res.error) || '未知原因'), '⚠️');
+  }
+}
+
+/* 一键复制诊断信息：用户贴回来，就能判断问题卡在哪一环，不必来回猜 */
+function nativeDiagText() {
+  var inf = nativeCaps(), st = S.settings, L = [];
+  L.push('我的课表 · Android 客户端 诊断信息');
+  L.push('时间：' + new Date().toLocaleString());
+  L.push('版本：' + (inf.version || '?') + '（Android API ' + (inf.sdk || '?') + '）');
+  L.push('课表：' + S.courses.length + ' 门课 / 作业 ' + S.tasks.length + ' 项');
+  L.push('学期：开学 ' + st.semesterStart + '，共 ' + st.weeks + ' 周');
+  L.push('当前：第 ' + currentWeek() + ' 周 · ' + parityText(currentWeek()) +
+    '（第 1 周算' + ((st.parityShift || 0) === 1 ? '双周' : '单周') + '）');
+  L.push('通知权限：' + (inf.notify ? '已允许' : '未允许 ← 到点不会响'));
+  L.push('精确闹钟：' + (inf.exact ? '已允许' : '未允许 ← 可能延迟几分钟'));
+  L.push('电池优化：' + (inf.battery ? '已忽略（好）' : '未忽略 ← 后台可能被掐掉'));
+  L.push('已排系统闹钟：' + inf.pending + ' 条');
+  L.push('上课提醒：' + (st.classRemind ? '开 · 提前 ' + st.classLead + ' 分钟' : '已关'));
+  L.push('作业提醒：' + (st.taskRemind ? '开 · 提前 ' + (st.taskLeads || []).join('/') + ' 分钟' : '已关'));
+  L.push('响铃/震动：' + (st.ring ? '响铃' : '静音') + ' / ' + (st.vibrate ? '震动' : '不震'));
+  L.push('系统通知总开关：' + (st.notifyOff ? '已在 App 内关闭' : '正常'));
+  return L.join('\n');
+}
+function copyNativeDiag() {
+  var t = nativeDiagText();
+  function fallback() {
+    openSheet('<div class="sheet-grip"></div><div class="sheet-title">诊断信息</div>' +
+      '<div class="card"><div class="hint" style="white-space:pre-wrap;word-break:break-all">' + esc(t) + '</div></div>' +
+      '<div class="hint" style="margin:10px 0 4px">长按上方文字即可全选复制</div>' +
+      '<div class="btn-row"><button class="btn primary block" id="diagClose">关闭</button></div>');
+    if ($('#diagClose')) $('#diagClose').onclick = closeSheet;
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(function () { toast('诊断信息已复制，粘贴发我就行', '📋'); }, fallback);
+    } else { fallback(); }
+  } catch (e) { fallback(); }
+}
+
+if (NATIVE) {
+  /* 页面就绪 / 每次回到前台：领走原生已触发的提醒，然后重排一次闹钟 */
+  window.__csNativeReady = function () {
+    try {
+      mergeNativeFired();
+      nativeCaps();
+      syncNativeNow(true);
+      renderBell();
+      if (UI.page === 'settings') renderSettings();
+      if (UI.page === 'tasks') renderTasks();
+      if (UI.page === 'agenda') renderAgenda();
+    } catch (e) { }
+  };
+  window.__csOnPerm = function () {
+    try { nativeCaps(); renderSettings(); renderBell(); syncNativeNow(true); } catch (e) { }
+  };
+  /* 返回键：先关弹层，再回课表页，都没有才退到桌面 */
+  window.__csNativeBack = function () {
+    try {
+      if (UI.open) { closeSheet(); return 'handled'; }
+      if (UI.page !== 'schedule') { goPage('schedule'); return 'handled'; }
+      if (UI.week !== clampWeek(currentWeek())) { setWeek(clampWeek(currentWeek())); return 'handled'; }
+    } catch (e) { }
+    return 'exit';
+  };
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+else init();
+
+/* 供调试 / 自检 */
+window.__CS = {
+  get S() { return S; }, save: save, renderAll: renderAll, checkReminders: checkReminders,
+  currentWeek: currentWeek, courseBlocks: courseBlocks, exportICS: exportICS,
+  /* 调试用：查看种子是否被采纳、以及为什么没被采纳 */
+  get SEED() { return SEED; }, seedMatchesNow: seedMatchesNow,
+  get UI() { return UI; },
+  /* APK 桥接层：自检脚本与现场排障用 */
+  get NATIVE() { return NATIVE; }, nativeCaps: nativeCaps, nativePayload: nativePayload,
+  syncNativeNow: syncNativeNow, mergeNativeFired: mergeNativeFired,
+  classTemplates: classTemplates, upcomingTasks: upcomingTasks,
+  permState: permState, download: download, catchUp: catchUp,
+  nativeTestAlarm: nativeTestAlarm, nativeDiagText: nativeDiagText, copyNativeDiag: copyNativeDiag,
+  nativeHintText: nativeHintText
+};
+})();

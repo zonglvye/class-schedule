@@ -1,0 +1,106 @@
+plugins {
+    id 'com.android.application'
+}
+
+/*
+ * 签名：CI 里通过环境变量注入（keystore 以 base64 存在 GitHub Secrets）。
+ *   KS_FILE / KS_PASSWORD / KS_ALIAS / KS_KEY_PASSWORD
+ * 本地没有这些变量时，release 自动退回 debug 签名，保证任何环境都能出包自测。
+ */
+def ksFile = System.getenv('KS_FILE')
+def ksPass = System.getenv('KS_PASSWORD')
+def ksAlias = System.getenv('KS_ALIAS')
+def ksKeyPass = System.getenv('KS_KEY_PASSWORD')
+def hasReleaseSigning = ksFile != null && ksFile.trim().length() > 0 &&
+        new File(ksFile).exists() &&
+        ksPass != null && ksPass.length() > 0 &&
+        ksAlias != null && ksAlias.length() > 0
+
+// CI 用 -Pvc=<run_number> -Pvn=1.0.<run_number> 注入，便于一眼看出装的是哪一版。
+// 对脏输入（未展开的变量、空串）保持宽容，避免一个构建参数把整次打包搞崩。
+def vcRaw = (findProperty('vc') ?: '1').toString().trim()
+def vnRaw = (findProperty('vn') ?: '1.0.0').toString().trim()
+def buildVc = vcRaw.isInteger() ? vcRaw.toInteger() : 1
+def buildVn = vnRaw.isEmpty() ? '1.0.0' : vnRaw
+
+android {
+    namespace 'io.github.zonglvye.classschedule'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'io.github.zonglvye.classschedule'
+        minSdk 24
+        targetSdk 34
+        versionCode buildVc
+        versionName buildVn
+        resourceConfigurations += ['zh', 'zh-rCN', 'en']
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(ksFile)
+                storePassword ksPass
+                keyAlias ksAlias
+                keyPassword(ksKeyPass != null ? ksKeyPass : ksPass)
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // 必须显式指定 UTF-8：javac 默认跟随系统编码，在中文 Windows 上会把
+    // .java 里的中文通知文案按 GBK 解读，编出来的 APK 通知全是乱码。
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+
+    // 单元测试：用 Robolectric 在 JVM 上真跑原生逻辑（闹钟排程、通知、开机重排、导出）
+    // 注意 includesAndroidResources 是必须的，否则读不到 strings.xml 里的渠道名
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            returnDefaultValues = true
+        }
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/*.kotlin_module', 'META-INF/*.version']
+        }
+    }
+
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            outputFileName = "class-schedule-${variant.versionName}-${variant.buildType.name}.apk"
+        }
+    }
+}
+
+// 主程序零第三方依赖（只用 framework API，包体最小）
+// 下面这些是 testImplementation —— 只在编译期跑测试用，不会打进 APK
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.13'
+}

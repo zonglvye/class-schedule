@@ -1,0 +1,13 @@
+# 统一换行符，避免 Windows 上 checkout 后出现整文件 diff 噪音
+* text=auto eol=lf
+
+# 图片与压缩包不要做文本转换
+*.png binary
+*.zip binary
+# 关键：APK / jar / keystore 一旦被文本转换就会损坏（安装包直接报废），必须显式声明为二进制
+*.apk binary
+*.jar binary
+*.keystore binary
+# Windows 批处理要 CRLF，Linux shell 脚本要 LF
+*.bat text eol=crlf
+gradlew text eol=lf

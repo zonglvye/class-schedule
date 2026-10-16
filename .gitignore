@@ -1,0 +1,26 @@
+# ---- 只发布这 4 项（GitHub Pages 会把仓库里所有文件都当静态资源发布）----
+#   index.html / manifest.json / sw.js / assets/
+
+# 本地开发工具与自检页：保留在本机，不进仓库
+_dev/
+
+# 依赖目录（写成 node_modules/ 只会匹配仓库根，必须用 **/ 覆盖任意层级）
+**/node_modules/
+
+# 本地二进制（cloudflared 约 53 MB）
+**/bin/cloudflared*
+*.zip
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# npm 安装产生的锁文件（本项目零依赖，不需要）
+package-lock.json
+_dev/surgenv/
+
+# ⚠️ 注意：apk/ 与根目录的 app.apk 是【故意入库】的 —— GitHub Pages 靠它们分发安装包。
+#    这里绝对不能写 *.apk，否则手机就下载不到安装包了。

@@ -1,0 +1,22 @@
+{
+  "name": "class-schedule-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "手机课表 · 作业待办 · 定时提醒（纯前端 PWA，单文件可离线运行，无任何依赖）",
+  "type": "module",
+  "scripts": {
+    "dev": "node _dev/serve.mjs 4173",
+    "serve": "node _dev/serve.mjs 4173",
+    "build": "node _dev/build.mjs",
+    "test": "node _dev/test-logic.mjs",
+    "icons": "node _dev/make-icons.mjs",
+    "check": "node _dev/build.mjs && node _dev/test-logic.mjs",
+    "deploy": "powershell -ExecutionPolicy Bypass -File _dev/deploy.ps1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "surge": "^0.44.6"
+  }
+}

@@ -1,0 +1,212 @@
+name: build-apk
+
+# 云端出包：runner 自带 Android SDK，你本机一个字节都不用装。
+#
+# 重要设计：CI 不依赖 _dev/ 目录（它被 .gitignore 排除，检出后根本不存在）。
+# 直接复用仓库里已提交的 index.html（单文件、已内联 CSS/JS/专属种子），
+# 这样 APK 内置的网页与 GitHub Pages 上的网页版**保证是同一份**，不会各走各的。
+#
+# 产物两份：① Actions 附件（需登录下载）② 提交到仓库 app.apk 与 apk/，由 Pages 直接分发
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'assets/**'
+      - 'index.html'
+      - 'manifest.json'
+      - 'android/**'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ---------------------------------------------------------------- 预检
+      - name: 预检：index.html 必须与 assets/ 源码一致
+        run: |
+          node -e '
+          const fs = require("fs");
+          const h = fs.readFileSync("index.html", "utf8");
+          // 内联构建会把源码尾部的空白去掉再写入，所以这里也用 trim() 对齐
+          const bad = ["assets/app.js", "assets/style.css"]
+            .filter((f) => !h.includes(fs.readFileSync(f, "utf8").trim()));
+          if (bad.length) {
+            console.error("::error::index.html 与源码不一致: " + bad.join(", ") +
+              " —— 本地重新生成 index.html 后再提交（见 README 第六节）");
+            process.exit(1);
+          }
+          console.log("✓ index.html 与 assets/ 源码一致");
+          '
+
+      - name: 预检：Android 工程结构完整
+        run: |
+          set -euo pipefail
+          for f in android/settings.gradle android/build.gradle android/gradlew \
+                   android/gradle/wrapper/gradle-wrapper.jar \
+                   android/app/build.gradle android/app/src/main/AndroidManifest.xml; do
+            [ -f "$f" ] || { echo "::error::缺少 $f"; exit 1; }
+          done
+          echo "✓ 工程结构完整"
+          ls android/app/src/main/java/io/github/zonglvye/classschedule/
+
+      # ------------------------------------------------------- 组装网页资源
+      - name: 组装 APK 内置网页资源
+        run: |
+          set -euo pipefail
+          WWW=android/app/src/main/assets/www
+          rm -rf "$WWW"
+          mkdir -p "$WWW/assets"
+          cp index.html manifest.json "$WWW/"
+          cp assets/app.js assets/style.css "$WWW/assets/"
+          cp assets/*.png "$WWW/assets/"
+          # 空 Service Worker：APK 内资源全在本地，缓存层毫无意义，
+          # 留着反而有「换了新 APK 却仍加载旧缓存」的风险。没有 fetch 处理器 = 不拦截任何请求。
+          printf '/* APK 内置版本：资源全在本地，无需缓存层 */\nself.addEventListener("install", () => self.skipWaiting());\nself.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));\n' > "$WWW/sw.js"
+          # 课表种子是可选的：带种子 = 专属课表，不带 = 通用模板（首次打开走新手引导）
+          if grep -qE 'window\.__SEED__[[:space:]]*=[[:space:]]*\{' "$WWW/index.html"; then
+            echo "  含专属课表种子"
+          else
+            echo "  无课表种子（通用模板）"
+          fi
+          # 原生桥接代码必须存在，否则提醒功能整个失效
+          grep -q 'window.CSApp' "$WWW/index.html" || { echo "::error::index.html 里没有原生桥接代码，提醒功能会失效"; exit 1; }
+          echo "内置网页资源："
+          find "$WWW" -type f -printf '  %8s  %p\n' | sort -k2
+
+      # ------------------------------------------------------------ 编译
+      # setup-gradle 只用来做构建缓存；Gradle 本身走仓库里的 wrapper，版本完全可控
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 跑原生层单元测试（Robolectric，不需要真机）
+        run: |
+          set -euo pipefail
+          cd android
+          chmod +x gradlew
+          ./gradlew --no-daemon testDebugUnitTest
+
+      - name: 归档测试报告（失败时也能看到哪条挂）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report-${{ github.run_number }}
+          path: android/app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+      - name: 编译 APK
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KS_B64:-}" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            export KS_FILE="$RUNNER_TEMP/release.keystore"
+            echo "SIGNED=release" >> "$GITHUB_ENV"
+            echo "✓ 使用 release 签名（keystore 来自 Secrets）"
+          else
+            echo "SIGNED=debug" >> "$GITHUB_ENV"
+            echo "::warning::未配置 ANDROID_KEYSTORE_BASE64，本次为 debug 签名。为避免「装了 debug 包以后无法覆盖升级正式版」，这次不会发布到 Pages，只作为 Actions 附件供测试。"
+          fi
+          cd android
+          chmod +x gradlew
+          ./gradlew --no-daemon \
+            "-Pvc=$GITHUB_RUN_NUMBER" "-Pvn=1.0.$GITHUB_RUN_NUMBER" \
+            assembleRelease
+
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -n1)
+          # 注意：GITHUB_ENV 里的变量只对「后续步骤」生效，本步骤内要用必须自己先赋值。
+          # （set -u 之下直接引用会以 "unbound variable" 失败 —— 这是踩过的坑）
+          APK_SIZE=$(du -h "$APK" | cut -f1)
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+          echo "APK_SIZE=$APK_SIZE" >> "$GITHUB_ENV"
+          unzip -l "$APK"
+          # 必须含 dex 与内置网页，否则说明打包漏了资源
+          for need in classes.dex assets/www/index.html assets/www/assets/app.js AndroidManifest.xml; do
+            unzip -l "$APK" | grep -q "$need" || { echo "::error::APK 缺少 $need"; exit 1; }
+          done
+          echo "✓ APK 内容完整，体积 $APK_SIZE"
+          # 签名者信息（确认用的是 release 签名而不是 debug）
+          # runner 上装了多个 build-tools，glob 会展开成多个路径，必须先取一个，否则命令直接报错
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | head -n1 || true)
+          if [ -n "${APKSIGNER:-}" ]; then
+            "$APKSIGNER" verify --print-certs "$APK" > /tmp/certs.txt 2>&1 || true
+            head -n 4 /tmp/certs.txt || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: class-schedule-apk-${{ github.run_number }}
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      # ------------------------------------------------------------ 分发
+      - name: 提交安装包到仓库（GitHub Pages 直接分发）
+        # 只有 release 签名才发布：debug 签名的包一旦被装上，以后就没法覆盖升级成正式版
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.SIGNED == 'release'
+        run: |
+          set -euo pipefail
+          mkdir -p apk
+          # 两个路径都放：app.apk 是短网址（方便手打/口述），apk/ 下是归档位
+          cp "$APK_PATH" apk/class-schedule.apk
+          cp "$APK_PATH" app.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f apk/class-schedule.apk app.apk
+          if git diff --cached --quiet; then
+            echo "安装包无变化，跳过提交"
+          else
+            git commit -m "chore(apk): 更新安装包 v1.0.$GITHUB_RUN_NUMBER [skip ci]"
+            git push
+            echo "✓ 已提交，GitHub Pages 稍后自动发布"
+          fi
+
+      - name: 输出下载地址
+        run: |
+          {
+            PAGES="https://$(echo '${{ github.repository }}' | tr 'A-Z' 'a-z' | cut -d/ -f1).github.io/$(echo '${{ github.repository }}' | cut -d/ -f2)"
+            echo "## APK 构建完成"
+            echo ""
+            echo "- 版本：\`1.0.$GITHUB_RUN_NUMBER\`（versionCode $GITHUB_RUN_NUMBER）"
+            echo "- 体积：$APK_SIZE"
+            echo "- 签名：$SIGNED"
+            echo ""
+            if [ "$SIGNED" = "release" ]; then
+              echo "手机直装（等 Pages 发布 1~2 分钟后生效）："
+              echo ""
+              echo "  $PAGES/app.apk"
+              echo "  备用：$PAGES/apk/class-schedule.apk"
+            else
+              echo "⚠️ **本次没有发布到 Pages**（使用了 debug 签名）。"
+              echo ""
+              echo "要拿到可长期升级的正式包，请先在仓库 Settings → Secrets and variables → Actions 里"
+              echo "配置这 4 项，然后重新运行本工作流："
+              echo ""
+              echo '```'
+              echo "ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD"
+              echo '```'
+              echo ""
+              echo "本次产物可在本页下方 Artifacts 里下载（仅用于测试）。"
+            fi
+            echo ""
+            echo "装好后请做三件事：允许通知 / 允许精确闹钟 / 关闭电池优化（App 内设置页会逐项引导）。"
+          } >> "$GITHUB_STEP_SUMMARY"

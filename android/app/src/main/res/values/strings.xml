@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">我的课表</string>
+    <string name="channel_class">上课提醒</string>
+    <string name="channel_class_desc">每节课开始前按设定的提前量提醒</string>
+    <string name="channel_task">作业截止提醒</string>
+    <string name="channel_task_desc">作业 DDL 前按提前量提醒</string>
+    <string name="channel_service">后台保活</string>
+    <string name="channel_service_desc">保持提醒可靠所需的常驻通知（通常不显示）</string>
+    <string name="action_done">知道了</string>
+    <string name="action_snooze">稍后 10 分钟</string>
+</resources>

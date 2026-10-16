@@ -1,0 +1,9 @@
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+captures/
+# 网页资源在构建时由 _dev/build-apk-web.mjs 复制进来，不进版本库
+app/src/main/assets/www/

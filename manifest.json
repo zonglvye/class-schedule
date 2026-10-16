@@ -1,0 +1,24 @@
+{
+  "name": "我的课表 · 作业待办 · 定时提醒",
+  "short_name": "我的课表",
+  "description": "手机课程表 + 作业待办 + 上课与截止定时提醒，数据全部保存在本机。",
+  "lang": "zh-CN",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui", "browser"],
+  "orientation": "portrait-primary",
+  "background_color": "#f2f3f8",
+  "theme_color": "#6366f1",
+  "categories": ["education", "productivity"],
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "assets/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "添加作业", "short_name": "加作业", "url": "./index.html?add=task", "icons": [{ "src": "assets/icon-192.png", "sizes": "192x192" }] },
+    { "name": "添加课程", "short_name": "加课程", "url": "./index.html?add=course", "icons": [{ "src": "assets/icon-192.png", "sizes": "192x192" }] },
+    { "name": "今日日程", "short_name": "日程", "url": "./index.html?page=agenda", "icons": [{ "src": "assets/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

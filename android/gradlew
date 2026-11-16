@@ -1,5 +1,19 @@
 #!/bin/sh
 
+# --- CI/JDK 兼容补丁（2026-11）------------------------------------------------
+# GitHub 的 ubuntu-latest 默认 JDK 已升到 25；Gradle 8.9 解析构建脚本会直接报
+#   BUG! exception in phase 'semantic analysis' ... Unsupported class file major version 69
+# 启动 Gradle 前尽量切到 JDK 17：只改 JAVA_HOME，找不到就保持原样。
+if [ -z "${JAVA_HOME:-}" ] || ! "$JAVA_HOME/bin/java" -version 2>&1 | grep -q 'version "17'; then
+  for d in /usr/lib/jvm/*17* /usr/lib/jvm/temurin-17* /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17*/x64; do
+    if [ -x "$d/bin/java" ]; then
+      JAVA_HOME="$d"
+      export JAVA_HOME
+      break
+    fi
+  done
+fi
+
 #
 # Copyright © 2015-2021 the original authors.
 #

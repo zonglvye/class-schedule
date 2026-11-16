@@ -120,12 +120,13 @@ html[data-theme="dark"] .g-head.today b{color:#a5b4fc}
 .break-tag i{flex:1;height:0;border-top:1px dashed var(--line)}
 .break-tag span{font-size:9.5px;color:var(--sub);letter-spacing:.5px}
 
-.crs{border-radius:var(--r-s);padding:6px 7px;display:flex;flex-direction:column;gap:1px;overflow:hidden;position:relative;
+.crs{border-radius:var(--r-s);padding:5px 6px;display:flex;flex-direction:column;gap:1px;overflow:hidden;position:relative;
   border-left:4px solid;cursor:pointer;transition:transform .12s;box-shadow:0 1px 5px rgba(0,0,0,.12);
   margin:3px 2px;z-index:2;min-height:0;touch-action:manipulation}
 .crs:active{transform:scale(.97)}
-.crs b{font-size:11.5px;font-weight:700;line-height:1.25;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all}
-.crs small{font-size:9.5px;opacity:.85;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.crs b{font-size:11.5px;font-weight:700;line-height:1.18;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all}
+.crs b.long{font-size:10.5px;line-height:1.14;letter-spacing:-.2px}
+.crs small{font-size:9px;opacity:.85;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .crs em{font-size:9px;opacity:.7;font-style:normal;margin-top:auto}
 .crs.now{outline:2px solid var(--indigo);outline-offset:-2px}
 .crs.now::after{content:"";position:absolute;top:0;right:0;width:6px;height:6px;border-radius:50%;background:var(--indigo);margin:4px}

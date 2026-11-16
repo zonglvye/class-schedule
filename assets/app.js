@@ -503,6 +503,10 @@ function renderTop() {
 function renderSchedule() {
   var wrap = $('#gridWrap'), nth = S.settings.slots.length, w = UI.week;
   var blocks = courseBlocks(w), today = today0();
+  /* 只排「有课」的星期：周末两天都没课时收起来，窄屏上每列宽度从 1/7 变成 1/5 */
+  var dayList = [1, 2, 3, 4, 5];
+  var anyWeekend = S.courses.some(function (cc) { return DAYS(cc).some(function (gg) { return gg.day >= 6; }); });
+  if (anyWeekend) dayList = [1, 2, 3, 4, 5, 6, 7];
 
   if (!S.courses.length) {
     wrap.innerHTML =
@@ -514,18 +518,22 @@ function renderSchedule() {
 
   /* 一节的高度 = 2 × per（含零高间隔行），要让 5 节尽量在一屏内放得下：
      可用高度 = 视口高 - 顶部栏/周次栏/提示条/底部导航/提示文字 ≈ 300px */
-  var per = Math.max(46, Math.min(96, Math.round((window.innerHeight - 300) / nth)));
-  var html = '<div class="g-grid">';
+  /* 每个大节占 2 条轨道，行高 = 2×per。可用高度先扣掉顶栏/周次栏/底栏，再平摊给每节，
+     卡片就不会在下半截留下大片空白（原来的公式少除了一次 2，行高翻倍）。 */
+  var per = Math.max(44, Math.min(96, Math.round((window.innerHeight - 340) / nth / 2)));
+  var cols = '42px repeat(' + dayList.length + ',minmax(0,1fr))';
+  var html = '<div class="g-grid" style="grid-template-columns:' + cols + '">';
 
   /* 表头：整行跨满所有列（grid-column:1/-1），里面自己再分 1+7 列 */
-  html += '<div class="g-headgroup" style="grid-column:1/-1;grid-row:1">';
+  html += '<div class="g-headgroup" style="grid-column:1/-1;grid-row:1;grid-template-columns:' + cols + '">';
   html += '<div class="g-corner"><span>' + nth + ' 节</span></div>';
-  for (var dw = 0; dw < 7; dw++) {
+  for (var hi = 0; hi < dayList.length; hi++) {
+    var dw = dayList[hi] - 1;
     var dt = addDays(weekStartDate(w), dw);
     var isToday = dt.getTime() === today.getTime();
     var mm = dt.getMonth() + 1, dd = dt.getDate();
     var lab = dd === 1 ? mm + '月' : String(dd);
-    html += '<div class="g-head' + (isToday ? ' today' : '') + (dw >= 5 ? ' we' : '') + '">' +
+    html += '<div class="g-head' + (isToday ? ' today' : '') + (dayList[hi] >= 6 ? ' we' : '') + '">' +
       '<b>' + WD_S[dw] + '</b><span>' + lab + '</span></div>';
   }
   html += '</div>';
@@ -540,10 +548,11 @@ function renderSchedule() {
     html += '<div class="g-space" style="grid-column:1/-1;grid-row:' + rB + '"></div>';
     html += '<div class="g-time" style="grid-column:1;grid-row:' + rA + ';height:' + periodH + 'px">' +
       '<b>' + esc(t.s) + '</b><span>' + esc(t.e) + '</span></div>';
-    for (var d = 1; d <= 7; d++) {
+    for (var ci = 0; ci < dayList.length; ci++) {
+      var d = dayList[ci];
       var isTd = dateOfSlot(w, d).getTime() === today.getTime();
       html += '<div class="g-cell' + (isTd ? ' today' : '') + (d >= 6 ? ' weekend' : '') +
-        '" style="grid-column:' + (d + 1) + ';grid-row:' + rA + ';height:' + periodH + 'px"' +
+        '" style="grid-column:' + (ci + 2) + ';grid-row:' + rA + ';height:' + periodH + 'px"' +
         ' data-act="cell" data-day="' + d + '" data-slot="' + i + '"></div>';
     }
   }
@@ -551,7 +560,9 @@ function renderSchedule() {
   /* 课程块：列 = 星期+1，行从第 2 行开始，每节占 2 行 */
   var nmin = nowMin();
   blocks.forEach(function (b) {
-    var col = b.day + 1;
+    var ci = dayList.indexOf(b.day);
+    if (ci < 0) return;
+    var col = ci + 2;
     var rStart = 2 + (b.from - 1) * 2;
     var span = (b.to - b.from + 1) * 2;
     var isNow = b.date.getTime() === today.getTime() && nmin >= parseHM(b.start) && nmin < parseHM(b.end);
@@ -560,10 +571,9 @@ function renderSchedule() {
       'background:linear-gradient(160deg,' + hexA(b.color, .18) + ',' + hexA(b.color, .07) + ');border-left-color:' + b.color + '"' +
       ' data-act="editCourse" data-id="' + b.id + '"' +
       ' title="' + esc(b.name + ' ' + b.start + '-' + b.end) + '">' +
-      '<b>' + esc(b.name) + '</b>' +
+      '<b' + (b.name.length > 10 ? ' class="long"' : '') + '>' + esc(b.name) + '</b>' +
       (b.room ? '<small>📍' + esc(b.room) + '</small>' : '') +
       (b.teacher ? '<small>👤' + esc(b.teacher) + '</small>' : '') +
-      '<em>' + esc(b.start) + '-' + esc(b.end) + '</em>' +
       '</div>';
   });
 
